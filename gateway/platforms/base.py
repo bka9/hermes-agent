@@ -21,6 +21,59 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 
+def utf16_len(s: str) -> int:
+    """Count UTF-16 code units in *s*.
+
+    Telegram's message-length limit (4 096) is measured in UTF-16 code units,
+    **not** Unicode code-points.  Characters outside the Basic Multilingual
+    Plane (emoji like 😀, CJK Extension B, musical symbols, …) are encoded as
+    surrogate pairs and therefore consume **two** UTF-16 code units each, even
+    though Python's ``len()`` counts them as one.
+
+    Ported from nearai/ironclaw#2304 which discovered the same discrepancy in
+    Rust's ``chars().count()``.
+    """
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _prefix_within_utf16_limit(s: str, limit: int) -> str:
+    """Return the longest prefix of *s* whose UTF-16 length ≤ *limit*.
+
+    Unlike a plain ``s[:limit]``, this respects surrogate-pair boundaries so
+    we never slice a multi-code-unit character in half.
+    """
+    if utf16_len(s) <= limit:
+        return s
+    # Binary search for the longest safe prefix
+    lo, hi = 0, len(s)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if utf16_len(s[:mid]) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    return s[:lo]
+
+
+def _custom_unit_to_cp(s: str, budget: int, len_fn) -> int:
+    """Return the largest codepoint offset *n* such that ``len_fn(s[:n]) <= budget``.
+
+    Used by :meth:`BasePlatformAdapter.truncate_message` when *len_fn* measures
+    length in units different from Python codepoints (e.g. UTF-16 code units).
+    Falls back to binary search which is O(log n) calls to *len_fn*.
+    """
+    if len_fn(s) <= budget:
+        return len(s)
+    lo, hi = 0, len(s)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len_fn(s[:mid]) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
 def is_network_accessible(host: str) -> bool:
     """Return True if *host* would expose the server beyond loopback.
 
@@ -629,6 +682,10 @@ class MessageEvent:
     # Auto-loaded skill(s) for topic/channel bindings (e.g., Telegram DM Topics,
     # Discord channel_skill_bindings).  A single name or ordered list.
     auto_skill: Optional[str | list[str]] = None
+
+    # Per-channel ephemeral system prompt (e.g. Discord channel_prompts).
+    # Applied at API call time and never persisted to transcript history.
+    channel_prompt: Optional[str] = None
     
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
@@ -721,6 +778,36 @@ _RETRYABLE_ERROR_PATTERNS = (
 
 # Type for message handlers
 MessageHandler = Callable[[MessageEvent], Awaitable[Optional[str]]]
+
+
+def resolve_channel_prompt(
+    config_extra: dict,
+    channel_id: str,
+    parent_id: str | None = None,
+) -> str | None:
+    """Resolve a per-channel ephemeral prompt from platform config.
+
+    Looks up ``channel_prompts`` in the adapter's ``config.extra`` dict.
+    Prefers an exact match on *channel_id*; falls back to *parent_id*
+    (useful for forum threads / child channels inheriting a parent prompt).
+
+    Returns the prompt string, or None if no match is found.  Blank/whitespace-
+    only prompts are treated as absent.
+    """
+    prompts = config_extra.get("channel_prompts") or {}
+    if not isinstance(prompts, dict):
+        return None
+
+    for key in (channel_id, parent_id):
+        if not key:
+            continue
+        prompt = prompts.get(key)
+        if prompt is None:
+            continue
+        prompt = str(prompt).strip()
+        if prompt:
+            return prompt
+    return None
 
 
 class BasePlatformAdapter(ABC):
@@ -1571,6 +1658,21 @@ class BasePlatformAdapter(ABC):
             # streaming already delivered the text (already_sent=True) or
             # when the message was queued behind an active agent.  Log at
             # DEBUG to avoid noisy warnings for expected behavior.
+            #
+            # Suppress stale response when the session was interrupted by a
+            # new message that hasn't been consumed yet.  The pending message
+            # is processed by the pending-message handler below (#8221/#2483).
+            if (
+                response
+                and interrupt_event.is_set()
+                and session_key in self._pending_messages
+            ):
+                logger.info(
+                    "[%s] Suppressing stale response for interrupted session %s",
+                    self.name,
+                    session_key,
+                )
+                response = None
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
             if response:
@@ -1886,7 +1988,11 @@ class BasePlatformAdapter(ABC):
         return content
     
     @staticmethod
-    def truncate_message(content: str, max_length: int = 4096) -> List[str]:
+    def truncate_message(
+        content: str,
+        max_length: int = 4096,
+        len_fn: Optional["Callable[[str], int]"] = None,
+    ) -> List[str]:
         """
         Split a long message into chunks, preserving code block boundaries.
 
@@ -1898,11 +2004,16 @@ class BasePlatformAdapter(ABC):
         Args:
             content: The full message content
             max_length: Maximum length per chunk (platform-specific)
+            len_fn: Optional length function for measuring string length.
+                     Defaults to ``len`` (Unicode code-points).  Pass
+                     ``utf16_len`` for platforms that measure message
+                     length in UTF-16 code units (e.g. Telegram).
 
         Returns:
             List of message chunks
         """
-        if len(content) <= max_length:
+        _len = len_fn or len
+        if _len(content) <= max_length:
             return [content]
 
         INDICATOR_RESERVE = 10   # room for " (XX/XX)"
@@ -1921,22 +2032,33 @@ class BasePlatformAdapter(ABC):
 
             # How much body text we can fit after accounting for the prefix,
             # a potential closing fence, and the chunk indicator.
-            headroom = max_length - INDICATOR_RESERVE - len(prefix) - len(FENCE_CLOSE)
+            headroom = max_length - INDICATOR_RESERVE - _len(prefix) - _len(FENCE_CLOSE)
             if headroom < 1:
                 headroom = max_length // 2
 
             # Everything remaining fits in one final chunk
-            if len(prefix) + len(remaining) <= max_length - INDICATOR_RESERVE:
+            if _len(prefix) + _len(remaining) <= max_length - INDICATOR_RESERVE:
                 chunks.append(prefix + remaining)
                 break
 
-            # Find a natural split point (prefer newlines, then spaces)
-            region = remaining[:headroom]
+            # Find a natural split point (prefer newlines, then spaces).
+            # When _len != len (e.g. utf16_len for Telegram), headroom is
+            # measured in the custom unit.  We need codepoint-based slice
+            # positions that stay within the custom-unit budget.
+            #
+            # _safe_slice_pos() maps a custom-unit budget to the largest
+            # codepoint offset whose custom length ≤ budget.
+            if _len is not len:
+                # Map headroom (custom units) → codepoint slice length
+                _cp_limit = _custom_unit_to_cp(remaining, headroom, _len)
+            else:
+                _cp_limit = headroom
+            region = remaining[:_cp_limit]
             split_at = region.rfind("\n")
-            if split_at < headroom // 2:
+            if split_at < _cp_limit // 2:
                 split_at = region.rfind(" ")
             if split_at < 1:
-                split_at = headroom
+                split_at = _cp_limit
 
             # Avoid splitting inside an inline code span (`...`).
             # If the text before split_at has an odd number of unescaped
@@ -1956,7 +2078,7 @@ class BasePlatformAdapter(ABC):
                     safe_split = candidate.rfind(" ", 0, last_bt)
                     nl_split = candidate.rfind("\n", 0, last_bt)
                     safe_split = max(safe_split, nl_split)
-                    if safe_split > headroom // 4:
+                    if safe_split > _cp_limit // 4:
                         split_at = safe_split
 
             chunk_body = remaining[:split_at]
