@@ -134,6 +134,9 @@ class TestSendMessageTool:
             "hello",
             thread_id=None,
             media_files=[],
+            call_intent=None,
+            voice_override=None,
+            call_origin=None,
         )
         mirror_mock.assert_called_once_with("telegram", "-1002", "hello", source_label="cli", thread_id=None)
 
@@ -173,6 +176,9 @@ class TestSendMessageTool:
             "hello",
             thread_id="99999",
             media_files=[],
+            call_intent=None,
+            voice_override=None,
+            call_origin=None,
         )
         mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="99999")
 
@@ -202,6 +208,9 @@ class TestSendMessageTool:
             "hello",
             thread_id="17585",
             media_files=[],
+            call_intent=None,
+            voice_override=None,
+            call_origin=None,
         )
         mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="17585")
 
@@ -232,6 +241,9 @@ class TestSendMessageTool:
             "hello",
             thread_id="17585",
             media_files=[],
+            call_intent=None,
+            voice_override=None,
+            call_origin=None,
         )
 
     def test_display_label_target_resolves_via_channel_directory(self, tmp_path):
@@ -270,6 +282,9 @@ class TestSendMessageTool:
             "hello",
             thread_id="17585",
             media_files=[],
+            call_intent=None,
+            voice_override=None,
+            call_origin=None,
         )
 
     def test_media_only_message_uses_placeholder_for_mirroring(self):
@@ -298,6 +313,9 @@ class TestSendMessageTool:
             "",
             thread_id=None,
             media_files=[("/tmp/example.ogg", False)],
+            call_intent=None,
+            voice_override=None,
+            call_origin=None,
         )
         mirror_mock.assert_called_once_with(
             "telegram",
