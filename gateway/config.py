@@ -67,6 +67,7 @@ class Platform(Enum):
     WEIXIN = "weixin"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
+    AGENTPHONE = "agentphone"
 
 
 @dataclass
@@ -267,6 +268,16 @@ class GatewayConfig:
             # Weixin requires both a token and an account_id
             if platform == Platform.WEIXIN:
                 if config.extra.get("account_id") and (config.token or config.extra.get("token")):
+                    connected.append(platform)
+                continue
+            # AgentPhone requires API key (token) + agent_id + agent's own phone number.
+            # The allowlist gates outbound calls, so an agent with no peers is still valid.
+            if platform == Platform.AGENTPHONE:
+                if (
+                    config.token
+                    and config.extra.get("agent_id")
+                    and config.extra.get("agent_phonenumber")
+                ):
                     connected.append(platform)
                 continue
             # Platforms that use token/api_key auth
@@ -1161,6 +1172,45 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 chat_id=qq_home,
                 name=os.getenv("QQ_HOME_CHANNEL_NAME", "Home"),
             )
+
+    # AgentPhone (voice/SMS via webhook)
+    agentphone_api_key = os.getenv("AGENTPHONE_API_KEY")
+    agentphone_agent_id = os.getenv("AGENTPHONE_AGENT_ID")
+    agentphone_agent_phone = os.getenv("AGENTPHONE_AGENT_PHONENUMBER")
+    if agentphone_api_key or agentphone_agent_id or agentphone_agent_phone:
+        if Platform.AGENTPHONE not in config.platforms:
+            config.platforms[Platform.AGENTPHONE] = PlatformConfig()
+        ap = config.platforms[Platform.AGENTPHONE]
+        ap.enabled = True
+        if agentphone_api_key:
+            ap.token = agentphone_api_key
+        if agentphone_agent_id:
+            ap.extra["agent_id"] = agentphone_agent_id
+        if agentphone_agent_phone:
+            ap.extra["agent_phonenumber"] = agentphone_agent_phone
+        allowed_raw = os.getenv("AGENTPHONE_ALLOWED_PHONENUMBERS", "")
+        if allowed_raw:
+            ap.extra["allowed_phonenumbers"] = [
+                n.strip() for n in allowed_raw.split(",") if n.strip()
+            ]
+        webhook_secret = os.getenv("AGENTPHONE_WEBHOOK_SECRET")
+        if webhook_secret:
+            ap.extra["webhook_secret"] = webhook_secret
+        base_url = os.getenv("AGENTPHONE_BASE_URL")
+        if base_url:
+            ap.extra["base_url"] = base_url.rstrip("/")
+        host = os.getenv("AGENTPHONE_HOST")
+        if host:
+            ap.extra["host"] = host
+        port = os.getenv("AGENTPHONE_PORT")
+        if port:
+            try:
+                ap.extra["port"] = int(port)
+            except ValueError:
+                pass
+        voice = os.getenv("AGENTPHONE_VOICE")
+        if voice:
+            ap.extra["voice"] = voice
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")

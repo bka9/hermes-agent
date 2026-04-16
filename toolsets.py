@@ -389,10 +389,41 @@ TOOLSETS = {
         "includes": []
     },
 
+    "hermes-agentphone": {
+        "description": (
+            "AgentPhone voice bot toolset — full Hermes tools for agents that "
+            "use the phone as one of several interaction channels (e.g. when "
+            "placing outbound calls from cron or cross-platform send_message)."
+        ),
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
+    # Restricted toolset applied per-turn while handling an *inbound*
+    # phone call.  The caller is treated as untrusted input, so the
+    # agent only has tools it needs to hold a short, scoped conversation.
+    # No send_message / cronjob / memory / session_search / file I/O /
+    # terminal / execute_code / home_assistant / email: a prompt
+    # injection inside the call cannot reach those tools because they
+    # aren't registered for the turn.
+    "hermes-agentphone-call": {
+        "description": (
+            "Restricted per-call toolset for AgentPhone inbound calls. "
+            "Only tools required to hold the conversation scope; no "
+            "cross-platform send, memory, filesystem, or shell access."
+        ),
+        "tools": [
+            "todo",
+            "clarify",
+            "web_search",
+        ],
+        "includes": []
+    },
+
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook", "hermes-agentphone"]
     }
 }
 
