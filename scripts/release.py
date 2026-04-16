@@ -595,7 +595,7 @@ AUTHOR_MAP = {
     "zzn+pa@zzn.im": "xinbenlv",
     "zaynjarvis@gmail.com": "ZaynJarvis",
     "zhiheng.liu@bytedance.com": "ZaynJarvis",
-    "izhaolongfei@gmail.com": "loongfay",
+"izhaolongfei@gmail.com": "loongfay",
     "296659110@qq.com": "lrt4836",
     "fe.daniel91@gmail.com": "beforeload",
     "libo1106@foxmail.com": "libo1106",
@@ -908,6 +908,7 @@ AUTHOR_MAP = {
     "wtyopenclaw@gmail.com": "WuTianyi123",  # PR #20275 salvage of #13723 (feishu markdown)
     "zhicheng.han@mathematik.uni-goettingen.de": "hanzckernel",  # PR #20311 (api-server approval events)
     # pander: empty email, salvaged via PR #19665 from #16126 by @ms-alan
+    "keviea@gmail.com": "bka9",
 }
 
 
