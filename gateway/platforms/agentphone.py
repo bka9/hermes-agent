@@ -86,7 +86,13 @@ _GRACEFUL_TIMEOUT_TEXT = (
 # Call-intent scoping ("interaction memory")
 DEFAULT_MAX_TURNS = 12
 INTERACTION_TTL_SECONDS = 3600  # 60 minutes — long enough for real calls.
-CALL_SCOPED_TOOLSET = "hermes-agentphone-call"
+DEFAULT_CALL_ALLOWED_TOOLS = [
+    "web_search",
+    "web_extract",
+    "todo",
+    "memory",
+    "session_search",
+]
 _DEFAULT_INBOUND_INTENT = (
     "Greet the caller politely, take a short message, and let them know the "
     "user will follow up. Do not share any other information."
@@ -247,6 +253,29 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         # metadata={"voice": "..."} on adapter.send().
         voice_cfg = extra.get("voice")
         self._voice: Optional[str] = str(voice_cfg).strip() if voice_cfg else None
+
+        # Tools the in-call agent is allowed to use.  Configurable so
+        # users can make it more permissive (e.g. add ``clarify``) or
+        # more restrictive (e.g. remove ``memory``).  Tools NOT in this
+        # list are simply not registered for the turn — the caller
+        # cannot coax the agent into using them.
+        raw_tools = extra.get("call_allowed_tools")
+        if isinstance(raw_tools, list) and raw_tools:
+            self._call_allowed_tools: List[str] = [
+                str(t).strip() for t in raw_tools if str(t).strip()
+            ]
+        else:
+            self._call_allowed_tools = list(DEFAULT_CALL_ALLOWED_TOOLS)
+
+        from toolsets import create_custom_toolset
+        create_custom_toolset(
+            name="hermes-agentphone-call",
+            description=(
+                "Per-call toolset for AgentPhone inbound calls, "
+                "configurable via platforms.agentphone.extra.call_allowed_tools"
+            ),
+            tools=self._call_allowed_tools,
+        )
 
         # Post-call summary delivery settings.
         delivery_mode = str(extra.get("summary_delivery", "always")).strip().lower()
@@ -635,7 +664,7 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         # in _run_agent (see gateway/run.py) and applies them for this
         # turn only, without caching them on the agent instance.
         event.ephemeral_system_prompt = _build_call_system_prompt(interaction.intent)
-        event.session_toolset = CALL_SCOPED_TOOLSET
+        event.session_toolset = "hermes-agentphone-call"
 
         # Stream the agent's reply into the HTTP response body as ndjson.
         # AgentPhone speaks each interim chunk immediately; the final chunk

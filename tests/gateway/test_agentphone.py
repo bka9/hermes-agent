@@ -1496,32 +1496,57 @@ class TestSendMessageToolRequiresIntent:
         assert "intent" not in as_str or "Telegram" in as_str or "telegram" in as_str
 
 
-class TestRestrictedToolsetRegistered:
-    def test_hermes_agentphone_call_exists_with_minimal_tools(self):
+class TestCallAllowedToolsConfig:
+    def test_default_tools_registered_on_adapter_init(self):
+        """Adapter __init__ registers hermes-agentphone-call via
+        create_custom_toolset with the default tool list."""
         from toolsets import TOOLSETS, resolve_toolset
 
+        _make_adapter()  # triggers create_custom_toolset
         assert "hermes-agentphone-call" in TOOLSETS
         tools = set(resolve_toolset("hermes-agentphone-call"))
-        assert tools  # non-empty
+        from gateway.platforms.agentphone import DEFAULT_CALL_ALLOWED_TOOLS
 
-        # Forbidden tools must not appear.
-        for forbidden in {
-            "send_message",
-            "cronjob",
-            "memory",
-            "session_search",
-            "read_file",
-            "write_file",
-            "patch",
-            "terminal",
-            "process",
-            "execute_code",
-            "ha_list_entities",
-            "ha_call_service",
-            "browser_navigate",
-            "skills_list",
-        }:
-            assert forbidden not in tools, f"forbidden tool {forbidden} leaked into hermes-agentphone-call"
+        assert tools == set(DEFAULT_CALL_ALLOWED_TOOLS)
+
+    def test_config_overrides_default_tools(self):
+        from toolsets import TOOLSETS, resolve_toolset
+
+        _make_adapter(call_allowed_tools=["web_search", "todo"])
+        tools = set(resolve_toolset("hermes-agentphone-call"))
+        assert tools == {"web_search", "todo"}
+
+    def test_dangerous_tools_not_in_default(self):
+        from gateway.platforms.agentphone import DEFAULT_CALL_ALLOWED_TOOLS
+
+        for dangerous in [
+            "send_message", "cronjob", "terminal", "process",
+            "execute_code", "read_file", "write_file", "patch",
+            "ha_list_entities", "ha_call_service", "browser_navigate",
+            "skills_list", "delegate_task",
+        ]:
+            assert dangerous not in DEFAULT_CALL_ALLOWED_TOOLS
+
+    def test_env_var_populates_call_allowed_tools(self, monkeypatch):
+        for var in (
+            "AGENTPHONE_API_KEY", "AGENTPHONE_AGENT_ID",
+            "AGENTPHONE_AGENT_PHONENUMBER", "AGENTPHONE_CALL_ALLOWED_TOOLS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AGENTPHONE_API_KEY", "sk")
+        monkeypatch.setenv("AGENTPHONE_AGENT_ID", "agt")
+        monkeypatch.setenv("AGENTPHONE_AGENT_PHONENUMBER", "+15551234567")
+        monkeypatch.setenv(
+            "AGENTPHONE_CALL_ALLOWED_TOOLS", "web_search, todo, memory"
+        )
+
+        config = GatewayConfig()
+        _apply_env_overrides(config)
+
+        tools = config.platforms[Platform.AGENTPHONE].extra.get(
+            "call_allowed_tools"
+        )
+        assert tools == ["web_search", "todo", "memory"]
 
     def test_hermes_agentphone_included_in_gateway_composite(self):
         from toolsets import TOOLSETS
