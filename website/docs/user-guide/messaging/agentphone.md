@@ -54,7 +54,7 @@ https://<your-public-host>/agentphone/webhook
 AgentPhone calls are different from chat messages: the recipient of a call is an unfamiliar person who may try to socially engineer the agent. Hermes applies four layers of defense:
 
 1. **Session isolation.** Each call gets a brand-new Hermes session keyed on the AgentPhone call `id`. The agent on the call starts with no history from your other platforms.
-2. **Restricted toolset.** During an inbound call Hermes loads the `hermes-agentphone-call` toolset, which contains only `todo`, `clarify`, and `web_search`. Tools like `send_message`, `memory`, `cronjob`, filesystem, terminal, and Home Assistant are not registered for the turn — the caller cannot coax the agent into using them because they aren't available.
+2. **Restricted toolset.** During an inbound call Hermes loads a configurable tool list (default: `web_search`, `web_extract`, `todo`, `memory`, `session_search`). Tools not in this list — `send_message`, `cronjob`, `terminal`, filesystem, Home Assistant, browser, etc. — are not registered for the turn, so the caller cannot coax the agent into using them. Configure via `AGENTPHONE_CALL_ALLOWED_TOOLS` or `extra.call_allowed_tools` in config.yaml.
 3. **Bound call intent.** Every outbound call requires a structured `intent` and `context_brief`. Those become the agent's only source of facts for the duration of the call; the agent is instructed to refuse anything outside that scope. For inbound calls the agent uses a conservative default intent configurable via `default_inbound_intent`.
 4. **Prompt-injection scan + turn budget.** Every inbound transcript is scanned for known prompt-injection patterns (`ignore previous instructions`, invisible unicode, etc.) — a match short-circuits to `{"text": "I can't help with that. Goodbye.", "hangup": true}` without invoking the agent. A per-call turn budget (default 12) puts an upper bound on conversations that get past the scanner.
 
@@ -81,7 +81,7 @@ send_message(
 | Outbound calls | Unrestricted — any valid E.164 number |
 | Webhook authenticity | HMAC-SHA256 of `{timestamp}.{body}` with `AGENTPHONE_WEBHOOK_SECRET`, 5-minute replay window |
 | Call stays on topic | Rigid `CALL PURPOSE` / `FACTS YOU MAY SHARE` / `FORBIDDEN TOPICS` system prompt |
-| Minimum-surface toolset | `hermes-agentphone-call` per-turn toolset override |
+| Minimum-surface toolset | Configurable per-call tool list (`AGENTPHONE_CALL_ALLOWED_TOOLS`) |
 | Known jailbreak patterns | Transcript scan reuses `agent/prompt_builder._CONTEXT_THREAT_PATTERNS` |
 | Runaway conversations | Per-call turn budget (default 12, configurable via `default_max_turns`) |
 
@@ -97,6 +97,7 @@ send_message(
 | `AGENTPHONE_PORT` | no (default `8646`) | Local port for the inbound webhook listener |
 | `AGENTPHONE_HOST` | no (default `0.0.0.0`) | Bind host |
 | `AGENTPHONE_BASE_URL` | no | Override the AgentPhone API base URL (for testing / on-prem) |
+| `AGENTPHONE_CALL_ALLOWED_TOOLS` | no | Comma-separated list of tools the agent may use during an inbound call. Default: `web_search,web_extract,todo,memory,session_search`. Add tools to make it more permissive; remove tools to restrict further. Tools not in this list are not registered for the turn. |
 | `AGENTPHONE_VOICE` | no | Default TTS voice for outbound calls (e.g. `Polly.Amy`, `Polly.Joanna`). Unset → AgentPhone's own default. Override per-call via `send_message(..., voice="Polly.Joanna")`. |
 
 ## Post-call summaries

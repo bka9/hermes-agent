@@ -399,26 +399,9 @@ TOOLSETS = {
         "includes": []
     },
 
-    # Restricted toolset applied per-turn while handling an *inbound*
-    # phone call.  The caller is treated as untrusted input, so the
-    # agent only has tools it needs to hold a short, scoped conversation.
-    # No send_message / cronjob / memory / session_search / file I/O /
-    # terminal / execute_code / home_assistant / email: a prompt
-    # injection inside the call cannot reach those tools because they
-    # aren't registered for the turn.
-    "hermes-agentphone-call": {
-        "description": (
-            "Restricted per-call toolset for AgentPhone inbound calls. "
-            "Only tools required to hold the conversation scope; no "
-            "cross-platform send, memory, filesystem, or shell access."
-        ),
-        "tools": [
-            "todo",
-            "clarify",
-            "web_search",
-        ],
-        "includes": []
-    },
+    # NOTE: hermes-agentphone-call is registered dynamically by
+    # AgentPhoneAdapter.__init__ via create_custom_toolset() so its
+    # tool list can be driven by config (extra.call_allowed_tools).
 
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
