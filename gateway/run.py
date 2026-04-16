@@ -2614,7 +2614,7 @@ class GatewayRunner:
             Platform.WEIXIN: "WEIXIN_ALLOWED_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
-            Platform.AGENTPHONE: "AGENTPHONE_ALLOWED_PHONENUMBERS",
+            Platform.AGENTPHONE: "AGENTPHONE_ALLOWED_INBOUND_NUMBERS",
         }
         platform_allow_all_map = {
             Platform.TELEGRAM: "TELEGRAM_ALLOW_ALL_USERS",

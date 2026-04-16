@@ -112,7 +112,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'agentphone:+15559876543' (places an outbound phone call; destination must be in AGENTPHONE_ALLOWED_PHONENUMBERS)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'agentphone:+15559876543' (places an outbound phone call to any valid E.164 number)"
             },
             "message": {
                 "type": "string",
@@ -1381,13 +1381,15 @@ async def _send_qqbot(pconfig, chat_id, message):
 async def _send_agentphone(pconfig, chat_id, message, call_intent=None, voice_override=None, call_origin=None):
     """Initiate an outbound AgentPhone call.
 
-    Enforces ``AGENTPHONE_ALLOWED_PHONENUMBERS`` locally before the
-    HTTP call.  ``chat_id`` is the destination phone number (E.164).
-    The message becomes the call's ``initialGreeting``.  ``call_intent``
-    is a dict ``{intent, context_brief, forbidden_topics}``; when the
-    call is launched from the send_message tool it is required so the
-    agent on the call stays bound to scope.  ``voice_override`` wins
-    over ``extra.voice``; both fall back to AgentPhone's own default.
+    ``chat_id`` is the destination phone number (E.164).  The message
+    becomes the call's ``initialGreeting``.  ``call_intent`` is a dict
+    ``{intent, context_brief, forbidden_topics}``; when the call is
+    launched from the send_message tool it is required so the agent on
+    the call stays bound to scope.  ``voice_override`` wins over
+    ``extra.voice``; both fall back to AgentPhone's own default.
+
+    Outbound calls are not restricted to the inbound allowlist — the
+    agent may dial any valid E.164 number.
     """
     try:
         from gateway.platforms.agentphone import (
@@ -1417,26 +1419,6 @@ async def _send_agentphone(pconfig, chat_id, message, call_intent=None, voice_ov
     target = normalize_e164(chat_id)
     if not target:
         return _error(f"Invalid destination phone number: {chat_id!r}")
-
-    allowed = {
-        n
-        for n in (normalize_e164(v) for v in extra.get("allowed_phonenumbers", []))
-        if n
-    }
-    if not allowed:
-        return _error(
-            "AgentPhone outbound is disabled: no numbers in "
-            "AGENTPHONE_ALLOWED_PHONENUMBERS"
-        )
-    if target not in allowed:
-        # Deliberately do not echo the raw target back — log via the
-        # adapter's redaction helper.  The caller is an LLM, so the error
-        # message is the only feedback channel; we say enough to diagnose
-        # without amplifying phone numbers into response logs.
-        return _error(
-            "Destination not in AGENTPHONE_ALLOWED_PHONENUMBERS; "
-            "add the number to the allowlist before calling it"
-        )
 
     voice = voice_override or extra.get("voice") or None
     result = await place_agentphone_call(

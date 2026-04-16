@@ -1188,9 +1188,9 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             ap.extra["agent_id"] = agentphone_agent_id
         if agentphone_agent_phone:
             ap.extra["agent_phonenumber"] = agentphone_agent_phone
-        allowed_raw = os.getenv("AGENTPHONE_ALLOWED_PHONENUMBERS", "")
+        allowed_raw = os.getenv("AGENTPHONE_ALLOWED_INBOUND_NUMBERS", "")
         if allowed_raw:
-            ap.extra["allowed_phonenumbers"] = [
+            ap.extra["allowed_inbound_numbers"] = [
                 n.strip() for n in allowed_raw.split(",") if n.strip()
             ]
         webhook_secret = os.getenv("AGENTPHONE_WEBHOOK_SECRET")

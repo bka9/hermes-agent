@@ -36,7 +36,7 @@ class TestAgentPhoneConfigLoading:
             "AGENTPHONE_API_KEY",
             "AGENTPHONE_AGENT_ID",
             "AGENTPHONE_AGENT_PHONENUMBER",
-            "AGENTPHONE_ALLOWED_PHONENUMBERS",
+            "AGENTPHONE_ALLOWED_INBOUND_NUMBERS",
             "AGENTPHONE_WEBHOOK_SECRET",
             "AGENTPHONE_BASE_URL",
             "AGENTPHONE_HOST",
@@ -50,7 +50,7 @@ class TestAgentPhoneConfigLoading:
         monkeypatch.setenv("AGENTPHONE_AGENT_ID", "agt_abc123")
         monkeypatch.setenv("AGENTPHONE_AGENT_PHONENUMBER", "+15551234567")
         monkeypatch.setenv(
-            "AGENTPHONE_ALLOWED_PHONENUMBERS",
+            "AGENTPHONE_ALLOWED_INBOUND_NUMBERS",
             "+15559876543, +15550000001",
         )
         monkeypatch.setenv("AGENTPHONE_WEBHOOK_SECRET", "whsec_abc")
@@ -67,7 +67,7 @@ class TestAgentPhoneConfigLoading:
         assert ap.token == "sk-test-key"
         assert ap.extra["agent_id"] == "agt_abc123"
         assert ap.extra["agent_phonenumber"] == "+15551234567"
-        assert ap.extra["allowed_phonenumbers"] == [
+        assert ap.extra["allowed_inbound_numbers"] == [
             "+15559876543",
             "+15550000001",
         ]
@@ -119,19 +119,19 @@ class TestAgentPhoneConfigLoading:
 
         assert "port" not in config.platforms[Platform.AGENTPHONE].extra
 
-    def test_allowed_phonenumbers_empty_string_yields_no_list(self, monkeypatch):
+    def test_allowed_inbound_numbers_empty_string_yields_no_list(self, monkeypatch):
         self._clear_env(monkeypatch)
         monkeypatch.setenv("AGENTPHONE_API_KEY", "sk")
         monkeypatch.setenv("AGENTPHONE_AGENT_ID", "agt_x")
         monkeypatch.setenv("AGENTPHONE_AGENT_PHONENUMBER", "+15551234567")
-        monkeypatch.setenv("AGENTPHONE_ALLOWED_PHONENUMBERS", " , , ")
+        monkeypatch.setenv("AGENTPHONE_ALLOWED_INBOUND_NUMBERS", " , , ")
 
         config = GatewayConfig()
         _apply_env_overrides(config)
 
         # All entries blank → key not added (treated as no allowlist set).
         ap = config.platforms[Platform.AGENTPHONE]
-        assert ap.extra.get("allowed_phonenumbers", []) == []
+        assert ap.extra.get("allowed_inbound_numbers", []) == []
 
 
 class TestAgentPhonePlatformConfigFromDict:
@@ -143,7 +143,7 @@ class TestAgentPhonePlatformConfigFromDict:
             "extra": {
                 "agent_id": "agt_xyz",
                 "agent_phonenumber": "+15551234567",
-                "allowed_phonenumbers": ["+15559876543"],
+                "allowed_inbound_numbers": ["+15559876543"],
                 "webhook_secret": "whsec_xyz",
                 "base_url": "https://api.agentphone.to",
                 "host": "0.0.0.0",
@@ -154,7 +154,7 @@ class TestAgentPhonePlatformConfigFromDict:
         assert pc.enabled is True
         assert pc.token == "sk-test"
         assert pc.extra["agent_id"] == "agt_xyz"
-        assert pc.extra["allowed_phonenumbers"] == ["+15559876543"]
+        assert pc.extra["allowed_inbound_numbers"] == ["+15559876543"]
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +171,7 @@ def _make_adapter(**overrides) -> AgentPhoneAdapter:
     extra = {
         "agent_id": "agt_test",
         "agent_phonenumber": AGENT_PHONE,
-        "allowed_phonenumbers": [ALLOWED_PHONE],
+        "allowed_inbound_numbers": [ALLOWED_PHONE],
         "webhook_secret": SECRET,
         "host": "127.0.0.1",
         "port": 0,
@@ -541,13 +541,13 @@ class TestInboundDispatch:
 
 class TestAuthorizationMaps:
     def test_agentphone_registered_in_auth_maps(self):
-        """Gateway's _is_user_authorized honours AGENTPHONE_ALLOWED_PHONENUMBERS."""
+        """Gateway's _is_user_authorized honours AGENTPHONE_ALLOWED_INBOUND_NUMBERS."""
         import gateway.run as gw_run
 
         src_text = open(gw_run.__file__, encoding="utf-8").read()
         # Both auth maps must name the AgentPhone env vars.
         assert (
-            "Platform.AGENTPHONE: \"AGENTPHONE_ALLOWED_PHONENUMBERS\""
+            "Platform.AGENTPHONE: \"AGENTPHONE_ALLOWED_INBOUND_NUMBERS\""
             in src_text
         )
         assert (
@@ -556,14 +556,14 @@ class TestAuthorizationMaps:
 
     def test_env_allowlist_controls_authorization(self, monkeypatch):
         """_is_user_authorized returns True iff caller's E.164 is in
-        AGENTPHONE_ALLOWED_PHONENUMBERS."""
+        AGENTPHONE_ALLOWED_INBOUND_NUMBERS."""
         from unittest.mock import MagicMock
 
         import gateway.run as gw_run
         from gateway.session import SessionSource
 
         monkeypatch.setenv(
-            "AGENTPHONE_ALLOWED_PHONENUMBERS", "+15559876543,+15550000001"
+            "AGENTPHONE_ALLOWED_INBOUND_NUMBERS", "+15559876543,+15550000001"
         )
         monkeypatch.delenv("AGENTPHONE_ALLOW_ALL_USERS", raising=False)
         monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
@@ -949,32 +949,23 @@ class TestAdapterSend:
         assert calls[0].get("voice") is None
 
     @pytest.mark.asyncio
-    async def test_send_rejects_non_allowlisted(self, monkeypatch):
+    async def test_send_calls_any_number_without_allowlist_check(self, monkeypatch):
+        """Outbound calls are not restricted to the inbound allowlist."""
         from gateway.platforms import agentphone as ap_mod
 
+        calls = []
+
         async def _stub_place(**kwargs):
-            raise AssertionError("HTTP must not be attempted for non-allowlisted")
+            calls.append(kwargs)
+            return {"success": True, "call_id": "call_unl"}
 
         monkeypatch.setattr(ap_mod, "place_agentphone_call", _stub_place)
 
         adapter = _make_adapter()
+        # +15550001111 is NOT in the inbound allowlist — should still succeed.
         result = await adapter.send("+15550001111", "Hi")
-        assert result.success is False
-        assert "AGENTPHONE_ALLOWED_PHONENUMBERS" in (result.error or "")
-
-    @pytest.mark.asyncio
-    async def test_send_rejects_when_allowlist_empty(self, monkeypatch):
-        from gateway.platforms import agentphone as ap_mod
-
-        async def _stub_place(**kwargs):
-            raise AssertionError("HTTP must not be attempted")
-
-        monkeypatch.setattr(ap_mod, "place_agentphone_call", _stub_place)
-
-        adapter = _make_adapter(allowed_phonenumbers=[])
-        result = await adapter.send(ALLOWED_PHONE, "Hi")
-        assert result.success is False
-        assert "disabled" in (result.error or "").lower()
+        assert result.success is True
+        assert calls[0]["to_number"] == "+15550001111"
 
     @pytest.mark.asyncio
     async def test_send_rejects_invalid_destination(self):
@@ -1065,7 +1056,7 @@ class TestSendMessageToolRouting:
             token="sk-test",
             extra={
                 "agent_id": "agt_test",
-                "allowed_phonenumbers": [ALLOWED_PHONE],
+                "allowed_inbound_numbers": [ALLOWED_PHONE],
             },
         )
         result = await _send_agentphone(pconfig, ALLOWED_PHONE, "Ring ring.")
@@ -1078,20 +1069,27 @@ class TestSendMessageToolRouting:
         assert calls[0]["to_number"] == ALLOWED_PHONE
 
     @pytest.mark.asyncio
-    async def test_send_agentphone_standalone_rejects_non_allowlisted(self):
+    async def test_send_agentphone_standalone_calls_any_number(self, monkeypatch):
+        """Standalone _send_agentphone has no outbound allowlist."""
+        from gateway.platforms import agentphone as ap_mod
         from tools.send_message_tool import _send_agentphone
+
+        calls = []
+
+        async def _stub_place(**kwargs):
+            calls.append(kwargs)
+            return {"success": True, "call_id": "call_any"}
+
+        monkeypatch.setattr(ap_mod, "place_agentphone_call", _stub_place)
 
         pconfig = PlatformConfig(
             enabled=True,
             token="sk-test",
-            extra={
-                "agent_id": "agt_test",
-                "allowed_phonenumbers": [ALLOWED_PHONE],
-            },
+            extra={"agent_id": "agt_test"},
         )
         result = await _send_agentphone(pconfig, "+15550001111", "Hi")
-        assert "error" in result
-        assert "AGENTPHONE_ALLOWED_PHONENUMBERS" in result["error"]
+        assert result.get("success") is True
+        assert calls[0]["to_number"] == "+15550001111"
 
     @pytest.mark.asyncio
     async def test_send_agentphone_standalone_requires_credentials(self):
@@ -1100,7 +1098,7 @@ class TestSendMessageToolRouting:
         pconfig = PlatformConfig(
             enabled=True,
             token=None,
-            extra={"agent_id": "agt", "allowed_phonenumbers": [ALLOWED_PHONE]},
+            extra={"agent_id": "agt", "allowed_inbound_numbers": [ALLOWED_PHONE]},
         )
         result = await _send_agentphone(pconfig, ALLOWED_PHONE, "Hi")
         assert "error" in result
@@ -1667,7 +1665,7 @@ class TestVoiceConfiguration:
             enabled=True, token="sk",
             extra={
                 "agent_id": "agt",
-                "allowed_phonenumbers": [ALLOWED_PHONE],
+                "allowed_inbound_numbers": [ALLOWED_PHONE],
                 "voice": "Polly.Amy",
             },
         )
@@ -2040,7 +2038,7 @@ class TestSendMessageToolOriginCapture:
             token="sk",
             extra={
                 "agent_id": "agt",
-                "allowed_phonenumbers": [ALLOWED_PHONE],
+                "allowed_inbound_numbers": [ALLOWED_PHONE],
             },
         )
         monkeypatch.setattr(smt, "load_gateway_config", lambda: cfg, raising=False)
@@ -2102,7 +2100,7 @@ class TestStepFIntegration:
             "AGENTPHONE_API_KEY",
             "AGENTPHONE_AGENT_ID",
             "AGENTPHONE_AGENT_PHONENUMBER",
-            "AGENTPHONE_ALLOWED_PHONENUMBERS",
+            "AGENTPHONE_ALLOWED_INBOUND_NUMBERS",
             "AGENTPHONE_WEBHOOK_SECRET",
         }.issubset(var_names)
 
