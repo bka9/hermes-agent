@@ -4668,12 +4668,24 @@ class GatewayRunner:
                 return None
             return QQAdapter(config)
 
-        elif platform == Platform.YUANBAO:
+elif platform == Platform.YUANBAO:
             from gateway.platforms.yuanbao import YuanbaoAdapter, WEBSOCKETS_AVAILABLE
             if not WEBSOCKETS_AVAILABLE:
                 logger.warning("Yuanbao: websockets not installed. Run: pip install websockets")
                 return None
             return YuanbaoAdapter(config)
+
+        elif platform == Platform.AGENTPHONE:
+            from gateway.platforms.agentphone import (
+                AgentPhoneAdapter,
+                check_agentphone_requirements,
+            )
+            if not check_agentphone_requirements():
+                logger.warning("AgentPhone: aiohttp not installed")
+                return None
+            adapter = AgentPhoneAdapter(config)
+            adapter.gateway_runner = self  # For post-call summary delivery
+            return adapter
 
         return None
     def _is_user_authorized(self, source: SessionSource) -> bool:
@@ -4716,7 +4728,8 @@ class GatewayRunner:
             Platform.WEIXIN: "WEIXIN_ALLOWED_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
-            Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
+Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
+            Platform.AGENTPHONE: "AGENTPHONE_ALLOWED_PHONENUMBERS",
         }
         platform_group_user_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_USERS",
@@ -4742,7 +4755,8 @@ class GatewayRunner:
             Platform.WEIXIN: "WEIXIN_ALLOW_ALL_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
-            Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
+Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
+            Platform.AGENTPHONE: "AGENTPHONE_ALLOW_ALL_USERS",
         }
         # Bots admitted by {PLATFORM}_ALLOW_BOTS bypass the human allowlist (#4466).
         platform_allow_bots_map = {
@@ -6794,6 +6808,13 @@ class GatewayRunner:
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
+            # Per-event ephemeral system prompt (e.g. AgentPhone's call
+            # intent + fact brief + hard rules).  Appended to
+            # context_prompt so the agent sees it as part of this turn's
+            # system prompt but not cached on the agent instance.
+            event_ephemeral = getattr(event, "ephemeral_system_prompt", None)
+            event_toolset_override = getattr(event, "session_toolset", None)
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -6805,6 +6826,8 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=event.message_id,
                 channel_prompt=event.channel_prompt,
+                extra_ephemeral_prompt=event_ephemeral,
+                session_toolset_override=event_toolset_override,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -13171,6 +13194,8 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        extra_ephemeral_prompt: Optional[str] = None,
+        session_toolset_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -13212,6 +13237,36 @@ class GatewayRunner:
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
+
+        # Per-turn toolset override — AgentPhone uses this to clamp the
+        # tool surface during inbound calls so the caller cannot coax
+        # the agent into cross-platform messaging or memory/email access.
+        if session_toolset_override:
+            from toolsets import resolve_toolset as _resolve_ts
+            override_tools = _resolve_ts(session_toolset_override) or []
+            if override_tools:
+                enabled_toolsets = sorted(set(override_tools))
+                logger.debug(
+                    "Per-turn toolset override %s applied (%d tools)",
+                    session_toolset_override, len(enabled_toolsets),
+                )
+            else:
+                logger.warning(
+                    "Per-turn toolset override %s resolved to no tools; "
+                    "ignoring and using platform default",
+                    session_toolset_override,
+                )
+
+        # Per-turn ephemeral system prompt layered on top of the session
+        # context prompt (e.g. AgentPhone call intent).  Never persisted
+        # on the cached agent instance — only appended to context_prompt
+        # for this invocation.
+        if extra_ephemeral_prompt:
+            context_prompt = (
+                f"{context_prompt}\n\n{extra_ephemeral_prompt}".strip()
+                if context_prompt
+                else extra_ephemeral_prompt
+            )
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):

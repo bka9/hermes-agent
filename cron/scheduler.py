@@ -499,6 +499,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 
+
     # Optionally wrap the content with a header/footer so the user knows this
     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
     # in config.yaml for clean output.

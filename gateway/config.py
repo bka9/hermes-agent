@@ -108,7 +108,8 @@ class Platform(Enum):
     WEIXIN = "weixin"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
-    YUANBAO = "yuanbao"
+YUANBAO = "yuanbao"
+    AGENTPHONE = "agentphone"
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -396,6 +397,9 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
     ),
+    Platform.AGENTPHONE: lambda cfg: bool(
+        cfg.token and cfg.extra.get("agent_id") and cfg.extra.get("agent_phonenumber")
+    ),
 }
 
 
@@ -452,7 +456,7 @@ class GatewayConfig:
         for platform, config in self.platforms.items():
             if not config.enabled:
                 continue
-            if self._is_platform_connected(platform, config):
+if self._is_platform_connected(platform, config):
                 connected.append(platform)
         return connected
 
@@ -1661,7 +1665,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 ),
             )
 
-    # Yuanbao — YUANBAO_APP_ID preferred
+# Yuanbao — YUANBAO_APP_ID preferred
     yuanbao_app_id = os.getenv("YUANBAO_APP_ID") or os.getenv("YUANBAO_APP_KEY")
     yuanbao_app_secret = os.getenv("YUANBAO_APP_SECRET")
     if yuanbao_app_id and yuanbao_app_secret:
@@ -1703,6 +1707,45 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         yuanbao_group_allow_from = os.getenv("YUANBAO_GROUP_ALLOW_FROM")
         if yuanbao_group_allow_from:
             extra["group_allow_from"] = yuanbao_group_allow_from
+
+    # AgentPhone (voice/SMS via webhook)
+    agentphone_api_key = os.getenv("AGENTPHONE_API_KEY")
+    agentphone_agent_id = os.getenv("AGENTPHONE_AGENT_ID")
+    agentphone_agent_phone = os.getenv("AGENTPHONE_AGENT_PHONENUMBER")
+    if agentphone_api_key or agentphone_agent_id or agentphone_agent_phone:
+        if Platform.AGENTPHONE not in config.platforms:
+            config.platforms[Platform.AGENTPHONE] = PlatformConfig()
+        ap = config.platforms[Platform.AGENTPHONE]
+        ap.enabled = True
+        if agentphone_api_key:
+            ap.token = agentphone_api_key
+        if agentphone_agent_id:
+            ap.extra["agent_id"] = agentphone_agent_id
+        if agentphone_agent_phone:
+            ap.extra["agent_phonenumber"] = agentphone_agent_phone
+        allowed_raw = os.getenv("AGENTPHONE_ALLOWED_PHONENUMBERS", "")
+        if allowed_raw:
+            ap.extra["allowed_phonenumbers"] = [
+                n.strip() for n in allowed_raw.split(",") if n.strip()
+            ]
+        webhook_secret = os.getenv("AGENTPHONE_WEBHOOK_SECRET")
+        if webhook_secret:
+            ap.extra["webhook_secret"] = webhook_secret
+        base_url = os.getenv("AGENTPHONE_BASE_URL")
+        if base_url:
+            ap.extra["base_url"] = base_url.rstrip("/")
+        host = os.getenv("AGENTPHONE_HOST")
+        if host:
+            ap.extra["host"] = host
+        port = os.getenv("AGENTPHONE_PORT")
+        if port:
+            try:
+                ap.extra["port"] = int(port)
+            except ValueError:
+                pass
+        voice = os.getenv("AGENTPHONE_VOICE")
+        if voice:
+            ap.extra["voice"] = voice
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")

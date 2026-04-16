@@ -133,11 +133,28 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+"description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat), 'agentphone:+15559876543' (places an outbound phone call; destination must be in AGENTPHONE_ALLOWED_PHONENUMBERS)"
             },
             "message": {
                 "type": "string",
                 "description": "The message text to send. To send an image or file, include MEDIA:<local_path> (e.g. 'MEDIA:/tmp/hermes/cache/img_xxx.jpg') in the message — the platform will deliver it as a native media attachment."
+            },
+            "intent": {
+                "type": "string",
+                "description": "REQUIRED for 'agentphone' targets. A short sentence describing what this call is for (e.g. 'Discuss the user's upcoming San Francisco trip'). The agent on the call must stay strictly within this purpose and politely refuse any off-topic requests from the recipient."
+            },
+            "context_brief": {
+                "type": "string",
+                "description": "REQUIRED for 'agentphone' targets. The ONLY facts the agent may share during the call. Anything not stated here must not be revealed to the recipient, even if they ask. Keep it concise and factual."
+            },
+            "forbidden_topics": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional, only meaningful for 'agentphone'. Explicit topics the agent must refuse to discuss (e.g. 'the user's email', 'other callers'). Additive to the implicit rule that anything outside context_brief is off-limits."
+            },
+            "voice": {
+                "type": "string",
+                "description": "Optional, only meaningful for 'agentphone'. Override the TTS voice for this call (e.g. 'Polly.Joanna'). Omit to use AGENTPHONE_VOICE from config or AgentPhone's own default."
             }
         },
         "required": []
@@ -177,6 +194,27 @@ def _handle_send(args):
     chat_id = None
     thread_id = None
 
+    # AgentPhone requires a structured intent + context brief at call
+    # initiation so the agent on the call is bound to a scope the
+    # recipient can't change via prompt injection.  Refuse early with a
+    # clear error so the LLM knows exactly what's missing.
+    intent_text = (args.get("intent") or "").strip()
+    context_brief = (args.get("context_brief") or "").strip()
+    forbidden_topics_arg = args.get("forbidden_topics") or []
+    if platform_name == "agentphone":
+        missing = []
+        if not intent_text:
+            missing.append("intent")
+        if not context_brief:
+            missing.append("context_brief")
+        if missing:
+            return tool_error(
+                "AgentPhone outbound calls require "
+                + " and ".join(f"'{m}'" for m in missing)
+                + ". 'intent' describes the call's purpose in one sentence; "
+                "'context_brief' lists the only facts the agent may share."
+            )
+
     if target_ref:
         chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
     else:
@@ -210,7 +248,7 @@ def _handle_send(args):
     except Exception as e:
         return json.dumps(_error(f"Failed to load gateway config: {e}"))
 
-    # Accept any platform name — built-in names resolve to their enum
+# Accept any platform name — built-in names resolve to their enum
     # member, plugin platform names create dynamic members via _missing_().
     try:
         platform = Platform(platform_name)
@@ -273,6 +311,44 @@ def _handle_send(args):
     if duplicate_skip:
         return json.dumps(duplicate_skip)
 
+    call_intent = None
+    voice_override = None
+    call_origin = None
+    if platform_name == "agentphone":
+        call_intent = {
+            "intent": intent_text,
+            "context_brief": context_brief,
+            "forbidden_topics": [
+                str(t).strip()
+                for t in forbidden_topics_arg
+                if str(t).strip()
+            ],
+        }
+        voice_arg = args.get("voice")
+        if voice_arg:
+            voice_override = str(voice_arg).strip() or None
+        # Capture the originating session so a post-call summary can be
+        # routed back to the same Telegram/Slack/etc. chat.  Skip when
+        # the prompt came in via the CLI — the summary will log locally.
+        try:
+            from gateway.session_context import get_session_env
+            origin_platform = (get_session_env("HERMES_SESSION_PLATFORM") or "").strip()
+            origin_chat_id = (get_session_env("HERMES_SESSION_CHAT_ID") or "").strip()
+            origin_thread_id = (get_session_env("HERMES_SESSION_THREAD_ID") or "").strip() or None
+        except Exception:
+            origin_platform = origin_chat_id = ""
+            origin_thread_id = None
+        if (
+            origin_platform
+            and origin_chat_id
+            and origin_platform not in ("cli", "local", "agentphone")
+        ):
+            call_origin = {
+                "platform": origin_platform,
+                "chat_id": origin_chat_id,
+                "thread_id": origin_thread_id,
+            }
+
     try:
         from model_tools import _run_async
         result = _run_async(
@@ -283,7 +359,10 @@ def _handle_send(args):
                 cleaned_message,
                 thread_id=thread_id,
                 media_files=media_files,
-                force_document=force_document_attachments,
+force_document=force_document_attachments,
+                call_intent=call_intent,
+                voice_override=voice_override,
+                call_origin=call_origin,
             )
         )
         if used_home_channel and isinstance(result, dict) and result.get("success"):
@@ -337,13 +416,18 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _WEIXIN_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), None, True
-    if platform_name == "yuanbao":
+if platform_name == "yuanbao":
         match = _YUANBAO_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), None, True
         if target_ref.strip().isdigit():
             return f"group:{target_ref.strip()}", None, True
         return None, None, False
+    if platform_name == "agentphone":
+        # E.164 phone numbers are the only valid AgentPhone target.
+        stripped = target_ref.strip()
+        if stripped.startswith("+") and stripped[1:].isdigit() and len(stripped) >= 8:
+            return stripped, None, True
     if platform_name in _PHONE_PLATFORMS:
         match = _E164_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -444,7 +528,7 @@ async def _send_via_adapter(platform, pconfig, chat_id, chunk):
     return {"error": f"No live adapter for platform '{platform.value}'. Is the gateway running with this platform connected?"}
 
 
-async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False):
+async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False, call_intent=None, voice_override=None, call_origin=None):
     """Route a message to the appropriate platform sender.
 
     Long messages are automatically chunked to fit within platform limits
@@ -657,8 +741,10 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_bluebubbles(pconfig.extra, chat_id, chunk)
         elif platform == Platform.QQBOT:
             result = await _send_qqbot(pconfig, chat_id, chunk)
-        elif platform == Platform.YUANBAO:
+elif platform == Platform.YUANBAO:
             result = await _send_yuanbao(chat_id, chunk)
+        elif platform == Platform.AGENTPHONE:
+            result = await _send_agentphone(pconfig, chat_id, chunk, call_intent=call_intent, voice_override=voice_override, call_origin=call_origin)
         else:
             # Plugin platform — route through the gateway's live adapter
             # if available, otherwise report the error.
@@ -1773,6 +1859,112 @@ async def _send_yuanbao(chat_id, message, media_files=None):
         return await send_yuanbao_direct(adapter, chat_id, message, media_files=media_files)
     except Exception as e:
         return _error(f"Yuanbao send failed: {e}")
+
+
+async def _send_agentphone(pconfig, chat_id, message, call_intent=None, voice_override=None, call_origin=None):
+    """Initiate an outbound AgentPhone call.
+
+    Enforces ``AGENTPHONE_ALLOWED_PHONENUMBERS`` locally before the
+    HTTP call.  ``chat_id`` is the destination phone number (E.164).
+    The message becomes the call's ``initialGreeting``.  ``call_intent``
+    is a dict ``{intent, context_brief, forbidden_topics}``; when the
+    call is launched from the send_message tool it is required so the
+    agent on the call stays bound to scope.  ``voice_override`` wins
+    over ``extra.voice``; both fall back to AgentPhone's own default.
+    """
+    try:
+        from gateway.platforms.agentphone import (
+            CallIntent,
+            CallOrigin,
+            DEFAULT_MAX_TURNS,
+            _register_call_interaction,
+            check_agentphone_requirements,
+            normalize_e164,
+            place_agentphone_call,
+        )
+        if not check_agentphone_requirements():
+            return _error("AgentPhone requirements not met (need aiohttp + httpx).")
+    except ImportError as e:
+        return _error(f"AgentPhone adapter not available: {e}")
+
+    extra = getattr(pconfig, "extra", {}) or {}
+    api_key = getattr(pconfig, "token", None)
+    agent_id = extra.get("agent_id")
+    base_url = extra.get("base_url") or "https://api.agentphone.to"
+
+    if not api_key or not agent_id:
+        return _error(
+            "AgentPhone not configured: set AGENTPHONE_API_KEY and AGENTPHONE_AGENT_ID"
+        )
+
+    target = normalize_e164(chat_id)
+    if not target:
+        return _error(f"Invalid destination phone number: {chat_id!r}")
+
+    allowed = {
+        n
+        for n in (normalize_e164(v) for v in extra.get("allowed_phonenumbers", []))
+        if n
+    }
+    if not allowed:
+        return _error(
+            "AgentPhone outbound is disabled: no numbers in "
+            "AGENTPHONE_ALLOWED_PHONENUMBERS"
+        )
+    if target not in allowed:
+        # Deliberately do not echo the raw target back — log via the
+        # adapter's redaction helper.  The caller is an LLM, so the error
+        # message is the only feedback channel, we say enough to diagnose
+        # without amplifying phone numbers into response logs.
+        return _error(
+            "Destination not in AGENTPHONE_ALLOWED_PHONENUMBERS; "
+            "add the number to the allowlist before calling it"
+        )
+
+    voice = voice_override or extra.get("voice") or None
+    result = await place_agentphone_call(
+        api_key=api_key,
+        agent_id=agent_id,
+        to_number=target,
+        initial_greeting=message,
+        base_url=base_url,
+        voice=voice,
+    )
+    if result.get("success"):
+        call_id = result.get("call_id")
+        intent_registered = False
+        if call_id and call_intent and call_intent.get("intent"):
+            intent_obj = CallIntent(
+                intent=call_intent["intent"],
+                context_brief=call_intent.get("context_brief", ""),
+                forbidden_topics=tuple(call_intent.get("forbidden_topics") or ()),
+                max_turns=int(call_intent.get("max_turns") or DEFAULT_MAX_TURNS),
+            )
+            origin_obj = None
+            if call_origin and call_origin.get("platform") and call_origin.get("chat_id"):
+                origin_obj = CallOrigin(
+                    platform=call_origin["platform"],
+                    chat_id=str(call_origin["chat_id"]),
+                    thread_id=call_origin.get("thread_id") or None,
+                )
+            intent_registered = _register_call_interaction(
+                call_id, intent_obj, origin=origin_obj
+            )
+        out = {
+            "success": True,
+            "platform": "agentphone",
+            "chat_id": target,
+            "message_id": call_id,
+        }
+        if call_intent and not intent_registered and call_id:
+            out["note"] = (
+                "Call placed, but the intent could not be registered "
+                "with a running gateway in this process. Inbound webhooks "
+                "for this call will fall back to the default intent, "
+                "and no post-call summary will be delivered."
+            )
+        return out
+    return _error(result.get("error") or "AgentPhone outbound call failed")
 
 
 # --- Registry ---
