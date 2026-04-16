@@ -4729,7 +4729,7 @@ elif platform == Platform.YUANBAO:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
 Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
-            Platform.AGENTPHONE: "AGENTPHONE_ALLOWED_PHONENUMBERS",
+            Platform.AGENTPHONE: "AGENTPHONE_ALLOWED_INBOUND_NUMBERS",
         }
         platform_group_user_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_USERS",

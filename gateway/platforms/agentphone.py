@@ -16,8 +16,8 @@ See docs.agentphone.to for the full contract.
 This file implements the adapter skeleton for Step B of the rollout:
 
 - aiohttp webhook server with HMAC verification and replay protection
-- from-number allowlist (the agent's own number plus
-  ``AGENTPHONE_ALLOWED_PHONENUMBERS``)
+- inbound from-number allowlist (the agent's own number plus
+  ``AGENTPHONE_ALLOWED_INBOUND_NUMBERS``)
 - dispatch of inbound calls as ``MessageEvent`` to the gateway
 
 Outbound ``send()`` and true ndjson streaming are implemented in later
@@ -230,9 +230,9 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         self._agent_phone: Optional[str] = normalize_e164(
             extra.get("agent_phonenumber")
         )
-        self._allowed_numbers: set[str] = {
+        self._allowed_inbound: set[str] = {
             n
-            for n in (normalize_e164(v) for v in extra.get("allowed_phonenumbers", []))
+            for n in (normalize_e164(v) for v in extra.get("allowed_inbound_numbers", []))
             if n
         }
         self._webhook_secret: str = extra.get("webhook_secret", "") or ""
@@ -355,11 +355,11 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         _active_adapter = self
         self._reaper_task = asyncio.create_task(self._reap_stale_interactions())
         logger.info(
-            "[agentphone] Listening on %s:%d%s (allowed=%d numbers)",
+            "[agentphone] Listening on %s:%d%s (allowed_inbound=%d numbers)",
             self._host,
             self._port,
             WEBHOOK_PATH,
-            len(self._allowed_numbers),
+            len(self._allowed_inbound),
         )
         return True
 
@@ -394,32 +394,15 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         """Initiate an outbound call via ``POST /v1/calls``.
 
         ``chat_id`` is the destination phone number in E.164 form.  The
-        message becomes the call's ``initialGreeting``.  Callers outside
-        the allowlist are rejected before any HTTP request is made —
-        AGENTPHONE_ALLOWED_PHONENUMBERS is the single source of truth
-        for who the agent may dial.
+        message becomes the call's ``initialGreeting``.  Outbound calls
+        are not restricted to the inbound allowlist — the agent may dial
+        any valid E.164 number.
         """
         target = normalize_e164(chat_id)
         if not target:
             return SendResult(
                 success=False,
                 error=f"Invalid destination number: {chat_id!r}",
-            )
-        if not self._allowed_numbers:
-            return SendResult(
-                success=False,
-                error=(
-                    "AgentPhone outbound is disabled: no numbers in "
-                    "AGENTPHONE_ALLOWED_PHONENUMBERS"
-                ),
-            )
-        if target not in self._allowed_numbers:
-            return SendResult(
-                success=False,
-                error=(
-                    f"Destination {_redact_phone(target)} is not in "
-                    "AGENTPHONE_ALLOWED_PHONENUMBERS"
-                ),
             )
         if not self._api_key or not self._agent_id:
             return SendResult(
@@ -580,9 +563,9 @@ class AgentPhoneAdapter(BasePlatformAdapter):
             )
             return web.json_response({"error": "Missing from-number"}, status=400)
 
-        if not self._is_allowed(from_number):
+        if not self._is_allowed_inbound(from_number):
             logger.warning(
-                "[agentphone] Rejecting call from %s (not in allowlist)",
+                "[agentphone] Rejecting inbound from %s (not in allowlist)",
                 _redact_phone(from_number),
             )
             return web.json_response({"error": "Forbidden"}, status=403)
@@ -1056,10 +1039,10 @@ class AgentPhoneAdapter(BasePlatformAdapter):
     # Allowlist
     # ------------------------------------------------------------------
 
-    def _is_allowed(self, from_number: str) -> bool:
+    def _is_allowed_inbound(self, from_number: str) -> bool:
         if self._agent_phone and from_number == self._agent_phone:
             return True
-        return from_number in self._allowed_numbers
+        return from_number in self._allowed_inbound
 
 
 # ----------------------------------------------------------------------

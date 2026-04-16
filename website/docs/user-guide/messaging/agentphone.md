@@ -35,7 +35,7 @@ Pick **AgentPhone** and follow the prompts. Alternatively, set the environment v
 export AGENTPHONE_API_KEY=sk-...
 export AGENTPHONE_AGENT_ID=agt_...
 export AGENTPHONE_AGENT_PHONENUMBER=+15551234567
-export AGENTPHONE_ALLOWED_PHONENUMBERS=+15559876543,+15550000001
+export AGENTPHONE_ALLOWED_INBOUND_NUMBERS=+15559876543,+15550000001
 export AGENTPHONE_WEBHOOK_SECRET=whsec_...
 # Optional:
 # export AGENTPHONE_PORT=8646
@@ -71,14 +71,14 @@ send_message(
 )
 ```
 
-`intent` and `context_brief` are **required** for AgentPhone targets. Numbers not in `AGENTPHONE_ALLOWED_PHONENUMBERS` are rejected before any HTTP call is made.
+`intent` and `context_brief` are **required** for AgentPhone targets. Outbound calls can be placed to any valid E.164 number — there is no outbound allowlist.
 
 ## Security model (summary)
 
 | Control | Enforced by |
 |---|---|
-| Inbound caller must be in allowlist | `AGENTPHONE_ALLOWED_PHONENUMBERS` / `AGENTPHONE_AGENT_PHONENUMBER` |
-| Outbound destination must be in allowlist | same |
+| Inbound caller must be in allowlist | `AGENTPHONE_ALLOWED_INBOUND_NUMBERS` / `AGENTPHONE_AGENT_PHONENUMBER` |
+| Outbound calls | Unrestricted — any valid E.164 number |
 | Webhook authenticity | HMAC-SHA256 of `{timestamp}.{body}` with `AGENTPHONE_WEBHOOK_SECRET`, 5-minute replay window |
 | Call stays on topic | Rigid `CALL PURPOSE` / `FACTS YOU MAY SHARE` / `FORBIDDEN TOPICS` system prompt |
 | Minimum-surface toolset | `hermes-agentphone-call` per-turn toolset override |
@@ -92,7 +92,7 @@ send_message(
 | `AGENTPHONE_API_KEY` | yes | Bearer token for `POST /v1/calls` |
 | `AGENTPHONE_AGENT_ID` | yes | AgentPhone agent id that places/receives calls |
 | `AGENTPHONE_AGENT_PHONENUMBER` | yes | The agent's own E.164 number (also implicitly allowed inbound) |
-| `AGENTPHONE_ALLOWED_PHONENUMBERS` | yes (for real use) | Comma-separated E.164 numbers; gates outbound and inbound |
+| `AGENTPHONE_ALLOWED_INBOUND_NUMBERS` | yes (for real use) | Comma-separated E.164 numbers; gates inbound callers only (outbound is unrestricted) |
 | `AGENTPHONE_WEBHOOK_SECRET` | recommended | Webhook signing secret (starts with `whsec_`). If unset, signature verification is skipped with a warning. |
 | `AGENTPHONE_PORT` | no (default `8646`) | Local port for the inbound webhook listener |
 | `AGENTPHONE_HOST` | no (default `0.0.0.0`) | Bind host |
