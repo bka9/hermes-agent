@@ -99,6 +99,7 @@ send_message(
 | `AGENTPHONE_BASE_URL` | no | Override the AgentPhone API base URL (for testing / on-prem) |
 | `AGENTPHONE_CALL_ALLOWED_TOOLS` | no | Comma-separated list of tools the agent may use during an inbound call. Default: `web_search,web_extract,todo,memory,session_search`. Add tools to make it more permissive; remove tools to restrict further. Tools not in this list are not registered for the turn. |
 | `AGENTPHONE_VOICE` | no | Default TTS voice for outbound calls (e.g. `Polly.Amy`, `Polly.Joanna`). Unset → AgentPhone's own default. Override per-call via `send_message(..., voice="Polly.Joanna")`. |
+| `AGENTPHONE_MODEL` | no | Per-call model override (e.g. `anthropic/claude-haiku-4-5`). When set, every inbound webhook turn is processed by this model instead of the gateway default — useful for picking a fast latency-tuned model for voice while keeping a heavier default for chat. Provider/api_key/base_url are inherited from the gateway, so the model must be reachable through the same provider. Unset → use the gateway default. |
 
 ## Post-call summaries
 

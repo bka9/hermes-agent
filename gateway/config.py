@@ -1216,6 +1216,9 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             ap.extra["call_allowed_tools"] = [
                 t.strip() for t in call_tools.split(",") if t.strip()
             ]
+        call_model = os.getenv("AGENTPHONE_MODEL", "").strip()
+        if call_model:
+            ap.extra["model"] = call_model
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
