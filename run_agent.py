@@ -5984,7 +5984,7 @@ class AIAgent:
                     shared,
                     self._client_log_context(),
                 )
-                return client
+return client
         # Inject TCP keepalives so the kernel detects dead provider connections
         # instead of letting them sit silently in CLOSE-WAIT (#10324).  Without
         # this, a peer that drops mid-stream leaves the socket in a state where
@@ -6008,6 +6008,11 @@ class AIAgent:
                 client_kwargs["http_client"] = keepalive_http
         # Uses the module-level `OpenAI` name, resolved lazily on first
         # access via __getattr__ below. Tests patch via `run_agent.OpenAI`.
+        # Disable openai SDK internal retries: when a request-scoped client is
+        # closed after a successful response, the SDK's retry path tries to
+        # re-send on the closed httpx.Client and raises APIConnectionError.
+        # Hermes already retries at a higher level with fresh clients.
+        client_kwargs.setdefault("max_retries", 0)
         client = OpenAI(**client_kwargs)
         logger.info(
             "OpenAI client created (%s, shared=%s) %s",
