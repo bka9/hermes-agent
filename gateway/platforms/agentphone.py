@@ -306,6 +306,19 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         voice_cfg = extra.get("voice")
         self._voice: Optional[str] = str(voice_cfg).strip() if voice_cfg else None
 
+        # Optional per-call model override.  When set, every inbound
+        # turn is processed by this model instead of the gateway's
+        # default — useful for picking a fast / latency-tuned model
+        # for voice (e.g. a haiku-sized model) while keeping a heavier
+        # default for chat platforms.  Same provider as the gateway's
+        # default unless callers also override base_url/api_key via
+        # other config; we intentionally do NOT bring in a second
+        # provider here to keep the surface small.
+        raw_call_model = extra.get("model")
+        self._call_model: Optional[str] = (
+            str(raw_call_model).strip() if raw_call_model else None
+        ) or None
+
         # Tools the in-call agent is allowed to use.  Configurable so
         # users can make it more permissive (e.g. add ``clarify``) or
         # more restrictive (e.g. remove ``memory``).  Tools NOT in this
@@ -717,6 +730,8 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         # turn only, without caching them on the agent instance.
         event.ephemeral_system_prompt = _build_call_system_prompt(interaction.intent)
         event.session_toolset = "hermes-agentphone-call"
+        if self._call_model:
+            event.session_model = self._call_model
 
         # Stream the agent's reply into the HTTP response body as ndjson.
         # AgentPhone speaks each interim chunk immediately; the final chunk

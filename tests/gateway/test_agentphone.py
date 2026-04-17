@@ -41,6 +41,7 @@ class TestAgentPhoneConfigLoading:
             "AGENTPHONE_BASE_URL",
             "AGENTPHONE_HOST",
             "AGENTPHONE_PORT",
+            "AGENTPHONE_MODEL",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -118,6 +119,32 @@ class TestAgentPhoneConfigLoading:
         _apply_env_overrides(config)
 
         assert "port" not in config.platforms[Platform.AGENTPHONE].extra
+
+    def test_model_env_var_populates_extras(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("AGENTPHONE_API_KEY", "sk")
+        monkeypatch.setenv("AGENTPHONE_AGENT_ID", "agt_x")
+        monkeypatch.setenv("AGENTPHONE_AGENT_PHONENUMBER", "+15551234567")
+        monkeypatch.setenv("AGENTPHONE_MODEL", "anthropic/claude-haiku-4-5")
+
+        config = GatewayConfig()
+        _apply_env_overrides(config)
+
+        ap = config.platforms[Platform.AGENTPHONE]
+        assert ap.extra["model"] == "anthropic/claude-haiku-4-5"
+
+    def test_model_env_var_blank_is_ignored(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("AGENTPHONE_API_KEY", "sk")
+        monkeypatch.setenv("AGENTPHONE_AGENT_ID", "agt_x")
+        monkeypatch.setenv("AGENTPHONE_AGENT_PHONENUMBER", "+15551234567")
+        monkeypatch.setenv("AGENTPHONE_MODEL", "   ")
+
+        config = GatewayConfig()
+        _apply_env_overrides(config)
+
+        ap = config.platforms[Platform.AGENTPHONE]
+        assert "model" not in ap.extra
 
     def test_allowed_inbound_numbers_empty_string_yields_no_list(self, monkeypatch):
         self._clear_env(monkeypatch)
@@ -1519,6 +1546,40 @@ class TestCallInteractionLifecycle:
         assert "Take a message and wrap up quickly." in ev.ephemeral_system_prompt
         assert "user's private data" in ev.ephemeral_system_prompt
         assert ev.session_toolset == "hermes-agentphone-call"
+        # Without an explicit AGENTPHONE_MODEL the adapter does NOT set
+        # session_model — gateway falls back to its configured default.
+        assert getattr(ev, "session_model", None) is None
+
+    @pytest.mark.asyncio
+    async def test_inbound_sets_session_model_when_configured(self):
+        """When AGENTPHONE_MODEL is set, every inbound webhook tags the
+        event with session_model so _run_agent uses the configured
+        voice-tuned model instead of the gateway default."""
+        adapter = _make_adapter(model="anthropic/claude-haiku-4-5")
+        app = _build_app(adapter)
+
+        captured = []
+
+        async def _handler(event):
+            captured.append(event)
+            return "Hi."
+
+        adapter._message_handler = _handler
+
+        payload = _inbound_payload(call_id="call_model_001")
+        body = json.dumps(payload).encode()
+        ts = int(time.time())
+        headers = {
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": str(ts),
+            "X-Webhook-Signature": _sign(body, ts),
+        }
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(WEBHOOK_PATH, data=body, headers=headers)
+            assert resp.status == 200
+
+        assert len(captured) == 1
+        assert captured[0].session_model == "anthropic/claude-haiku-4-5"
 
     @pytest.mark.asyncio
     async def test_inbound_uses_seeded_interaction(self, monkeypatch):
@@ -1822,6 +1883,23 @@ class TestCallAllowedToolsConfig:
         src = inspect.getsource(gw_run.GatewayRunner._run_agent)
         assert "session_toolset_override" in src
         assert "extra_ephemeral_prompt" in src
+
+    def test_gateway_run_applies_session_model_override(self):
+        """The gateway's _run_agent honours session_model_override from
+        events (AgentPhone uses this to swap to a voice-tuned model)."""
+        import inspect
+
+        import gateway.run as gw_run
+
+        src = inspect.getsource(gw_run.GatewayRunner._run_agent)
+        assert "session_model_override" in src
+        # The override is read from event.session_model in the message
+        # handler that fans out to _run_agent.
+        handler_src = inspect.getsource(
+            gw_run.GatewayRunner._handle_message_with_agent
+        )
+        assert "session_model" in handler_src
+        assert "session_model_override" in handler_src
 
 
 class TestVoiceConfiguration:

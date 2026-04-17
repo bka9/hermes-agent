@@ -6824,6 +6824,7 @@ Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
             # system prompt but not cached on the agent instance.
             event_ephemeral = getattr(event, "ephemeral_system_prompt", None)
             event_toolset_override = getattr(event, "session_toolset", None)
+            event_model_override = getattr(event, "session_model", None)
 
             # Run the agent
             agent_result = await self._run_agent(
@@ -6838,6 +6839,7 @@ Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
                 channel_prompt=event.channel_prompt,
                 extra_ephemeral_prompt=event_ephemeral,
                 session_toolset_override=event_toolset_override,
+                session_model_override=event_model_override,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -13206,6 +13208,7 @@ Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
         channel_prompt: Optional[str] = None,
         extra_ephemeral_prompt: Optional[str] = None,
         session_toolset_override: Optional[str] = None,
+        session_model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -13823,6 +13826,18 @@ Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
                     "api_calls": 0,
                     "tools": [],
                 }
+
+            # Per-turn model override (e.g. AgentPhone configured to use a
+            # latency-tuned voice model while the gateway default stays on
+            # a heavier chat model).  Only the model identifier is swapped;
+            # provider / api_key / base_url stay as resolved above, so the
+            # override should name a model on the same provider.
+            if session_model_override:
+                logger.debug(
+                    "Per-turn model override: %s -> %s (session=%s)",
+                    model, session_model_override, (session_key or "")[:30],
+                )
+                model = session_model_override
 
             pr = self._provider_routing
             reasoning_config = self._resolve_session_reasoning_config(
