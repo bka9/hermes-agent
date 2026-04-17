@@ -214,6 +214,12 @@ class CallInteraction:
     origin: Optional[CallOrigin] = None
     ended: bool = False
     summary_sent: bool = False
+    # Per-turn (speaker, text) pairs captured after each agent reply.
+    # "Caller" is the inbound transcript, "Agent" is the parsed message
+    # the adapter actually spoke.  Drives the conversation excerpt
+    # appended to the post-call summary so the originating chat sees
+    # what was discussed instead of just the call's purpose.
+    transcript: List[Tuple[str, str]] = field(default_factory=list)
 
 
 # Module-level reference to the running adapter, populated in ``connect()``
@@ -735,8 +741,9 @@ class AgentPhoneAdapter(BasePlatformAdapter):
 
         # Stream the agent's reply into the HTTP response body as ndjson.
         # AgentPhone speaks each interim chunk immediately; the final chunk
-        # (without the ``interim`` flag) closes the turn.
-        response = await self._stream_ndjson_reply(request, event)
+        # (without the ``interim`` flag) closes the turn.  Pass interaction
+        # so the streamer can record this turn into the post-call summary.
+        response = await self._stream_ndjson_reply(request, event, interaction)
         # Count the turn only after the response is successfully written
         # — a crashed/cancelled turn doesn't count against the budget.
         interaction.turn_count += 1
@@ -992,7 +999,10 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         return result or ""
 
     async def _stream_ndjson_reply(
-        self, request: "web.Request", event: MessageEvent
+        self,
+        request: "web.Request",
+        event: MessageEvent,
+        interaction: Optional[CallInteraction] = None,
     ) -> "web.StreamResponse":
         """Return an ``application/x-ndjson`` StreamResponse that emits the
         agent's reply as it becomes available.
@@ -1072,6 +1082,15 @@ class AgentPhoneAdapter(BasePlatformAdapter):
                         continue
 
             spoken_text, end_call = _parse_call_reply(reply)
+            # Record this turn for the post-call summary delivered back to
+            # the originating chat.  We log the parsed message (what was
+            # spoken) rather than the raw model output so the recap matches
+            # what the caller actually heard.
+            if interaction is not None:
+                caller_text = (event.text or "").strip()
+                if caller_text or spoken_text:
+                    interaction.transcript.append(("Caller", caller_text))
+                    interaction.transcript.append(("Agent", spoken_text or ""))
             fragments = _split_for_tts(spoken_text)
             if not fragments:
                 # Agent chose to say nothing (or returned end_call with an
@@ -1412,6 +1431,20 @@ def _format_template_summary(
             "(No end-of-call event received within the timeout; "
             "this summary was produced from local state.)"
         )
+
+    # Conversation excerpt — captured per turn in _stream_ndjson_reply.
+    # Append AFTER the AgentPhone-provided summary so the recap reads:
+    # purpose → outcome → AgentPhone's TL;DR → verbatim turns.  Truncate
+    # individual lines so a runaway turn doesn't blow out the recap.
+    transcript = list(interaction.transcript)
+    if transcript:
+        lines.append("")
+        lines.append("Conversation:")
+        for speaker, text in transcript:
+            text = (text or "").strip().replace("\n", " ")
+            if len(text) > 280:
+                text = text[:277] + "..."
+            lines.append(f"  {speaker}: {text}")
     return "\n".join(lines)
 
 
