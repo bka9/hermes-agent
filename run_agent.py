@@ -4389,6 +4389,11 @@ class AIAgent:
                 )
             except Exception:
                 pass  # Fall through to default transport if socket opts fail
+        # Disable openai SDK internal retries: when a request-scoped client is
+        # closed after a successful response, the SDK's retry path tries to
+        # re-send on the closed httpx.Client and raises APIConnectionError.
+        # Hermes already retries at a higher level with fresh clients.
+        client_kwargs.setdefault("max_retries", 0)
         client = OpenAI(**client_kwargs)
         logger.info(
             "OpenAI client created (%s, shared=%s) %s",
