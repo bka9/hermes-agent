@@ -38,6 +38,7 @@ PLATFORMS: OrderedDict[str, PlatformInfo] = OrderedDict([
     ("qqbot",          PlatformInfo(label="💬 QQBot",           default_toolset="hermes-qqbot")),
     ("webhook",        PlatformInfo(label="🔗 Webhook",         default_toolset="hermes-webhook")),
     ("api_server",     PlatformInfo(label="🌐 API Server",      default_toolset="hermes-api-server")),
+    ("agentphone",     PlatformInfo(label="📞 AgentPhone",      default_toolset="hermes-agentphone-call")),
 ])
 
 
