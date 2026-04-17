@@ -384,6 +384,16 @@ PLATFORM_HINTS = {
         "your response. Images are sent as native photos, and other files arrive as downloadable "
         "documents."
     ),
+    "agentphone": (
+        "You are on AgentPhone, a live voice phone call. Your reply is spoken aloud "
+        "to the caller via text-to-speech. Write conversational, spoken English — "
+        "short sentences, one or two per turn, no markdown, no code blocks, no "
+        "emoji, no URLs, no lists. Avoid spelling things out digit-by-digit or "
+        "reading punctuation. Do not include MEDIA: tags — voice calls cannot "
+        "send attachments. If the caller asks about anything outside the call's "
+        "stated purpose, politely decline. Interim sentences stream to the caller "
+        "as you produce them, so write naturally."
+    ),
 }
 
 # ---------------------------------------------------------------------------

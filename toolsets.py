@@ -389,10 +389,24 @@ TOOLSETS = {
         "includes": []
     },
 
+    "hermes-agentphone": {
+        "description": (
+            "AgentPhone voice bot toolset — full Hermes tools for agents that "
+            "use the phone as one of several interaction channels (e.g. when "
+            "placing outbound calls from cron or cross-platform send_message)."
+        ),
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
+    # NOTE: hermes-agentphone-call is registered dynamically by
+    # AgentPhoneAdapter.__init__ via create_custom_toolset() so its
+    # tool list can be driven by config (extra.call_allowed_tools).
+
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook", "hermes-agentphone"]
     }
 }
 

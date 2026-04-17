@@ -50,9 +50,14 @@ def _ensure_discord_mock():
     sys.modules.setdefault("discord.ext", ext_mod)
     sys.modules.setdefault("discord.ext.commands", commands_mod)
 
+    gw_mod = sys.modules.get("gateway.platforms.discord")
+    if gw_mod is not None and getattr(gw_mod, "discord", None) is None:
+        gw_mod.discord = sys.modules["discord"]
+
 
 _ensure_discord_mock()
 
+import gateway.platforms.discord as discord_platform  # noqa: E402
 from gateway.platforms.discord import DiscordAdapter  # noqa: E402
 
 
@@ -309,9 +314,8 @@ def _make_message(*, content: str = "hi", reference=None):
 @pytest.fixture
 def reply_text_adapter(monkeypatch):
     """DiscordAdapter wired for _handle_message → handle_message capture."""
-    import gateway.platforms.discord as discord_platform
-
     monkeypatch.setattr(discord_platform.discord, "DMChannel", FakeDMChannel, raising=False)
+    monkeypatch.setattr(discord_platform.discord, "Thread", type("Thread", (), {}), raising=False)
 
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = DiscordAdapter(config)

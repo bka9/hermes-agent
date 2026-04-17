@@ -691,6 +691,21 @@ class MessageEvent:
     # completion notifications) that must bypass user authorization checks.
     internal: bool = False
 
+    # Per-turn ephemeral system prompt to append to the agent's system
+    # prompt for this event only. Adapters set this to inject call-scoped
+    # constraints (e.g. AgentPhone's per-call intent + fact brief +
+    # forbidden topics); the gateway appends it to ``context_prompt``
+    # before invoking the agent, then drops it on the next turn.
+    ephemeral_system_prompt: Optional[str] = None
+
+    # Per-turn toolset override. When set, the gateway resolves this
+    # toolset name and uses it in place of the platform's default
+    # enabled_toolsets for this event. AgentPhone uses this to give the
+    # agent a restricted tool surface while handling an inbound call so
+    # the caller cannot coax it into cross-platform sends or memory/email
+    # access.
+    session_toolset: Optional[str] = None
+
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
     
