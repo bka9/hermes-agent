@@ -756,6 +756,88 @@ class TestStreamingReply:
         lines = self._parse_ndjson(raw)
         assert lines == [{"text": ""}]
 
+    @pytest.mark.asyncio
+    async def test_farewell_in_final_fragment_sets_hangup(self):
+        adapter = _make_adapter()
+
+        async def _handler(event):
+            return "Sounds good. Goodbye!"
+
+        adapter._message_handler = _handler
+
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await self._post_valid(cli)
+            raw = await resp.read()
+
+        lines = self._parse_ndjson(raw)
+        assert lines[0] == {"text": "Sounds good.", "interim": True}
+        assert lines[-1] == {"text": "Goodbye!", "hangup": True}
+
+    @pytest.mark.asyncio
+    async def test_farewell_only_in_earlier_fragment_does_not_hangup(self):
+        adapter = _make_adapter()
+
+        async def _handler(event):
+            # "goodbye" appears in fragment 0, but the LAST fragment is a
+            # follow-up question — call should stay open.
+            return "Just say goodbye when you're done. Anything else?"
+
+        adapter._message_handler = _handler
+
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await self._post_valid(cli)
+            raw = await resp.read()
+
+        lines = self._parse_ndjson(raw)
+        assert "hangup" not in lines[-1]
+
+    @pytest.mark.asyncio
+    async def test_handler_exception_emits_graceful_closer(self):
+        """When the message handler raises (e.g. provider connection error),
+        the adapter must still emit a non-interim closer so AgentPhone
+        doesn't hang waiting for end-of-turn."""
+        from gateway.platforms import agentphone as ap_mod
+
+        adapter = _make_adapter()
+
+        async def _broken_handler(event):
+            raise RuntimeError("simulated provider failure")
+
+        adapter._message_handler = _broken_handler
+
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await self._post_valid(cli)
+            raw = await resp.read()
+
+        assert resp.status == 200
+        lines = self._parse_ndjson(raw)
+        assert lines[-1] == {"text": ap_mod._GRACEFUL_TIMEOUT_TEXT}
+        assert "interim" not in lines[-1]
+
+
+class TestFarewellDetection:
+    def test_common_farewells_match(self):
+        from gateway.platforms.agentphone import _is_farewell
+
+        assert _is_farewell("Goodbye!")
+        assert _is_farewell("Have a great day.")
+        assert _is_farewell("Take care.")
+        assert _is_farewell("Talk to you later.")
+        assert _is_farewell("Thanks for calling!")
+        assert _is_farewell("Bye.")
+
+    def test_non_farewells_do_not_match(self):
+        from gateway.platforms.agentphone import _is_farewell
+
+        assert not _is_farewell("How can I help?")
+        assert not _is_farewell("Sure, that works.")
+        assert not _is_farewell("")
+        # Mid-sentence mentions of "bye" inside other words shouldn't trigger.
+        assert not _is_farewell("Maybe we should reschedule.")
+
 
 class TestSentenceSplitter:
     def test_splits_on_terminators(self):
