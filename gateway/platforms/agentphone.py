@@ -1007,7 +1007,10 @@ class AgentPhoneAdapter(BasePlatformAdapter):
             # below this point belong to the actual agent response.
             for frag in fragments[:-1]:
                 await _write_ndjson_line(response, {"text": frag, "interim": True})
-            await _write_ndjson_line(response, {"text": fragments[-1]})
+            final_obj: Dict[str, Any] = {"text": fragments[-1]}
+            if _is_farewell(fragments[-1]):
+                final_obj["hangup"] = True
+            await _write_ndjson_line(response, final_obj)
             await response.write_eof()
             return response
 
@@ -1025,6 +1028,28 @@ class AgentPhoneAdapter(BasePlatformAdapter):
                     await agent_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            return response
+        except Exception as exc:
+            # Anything else (model error, tool crash, etc.) would otherwise
+            # leave the response with a trailing keepalive interim chunk and
+            # no terminator — AgentPhone would wait until its own timeout.
+            # Emit the graceful closer so the turn ends cleanly.
+            logger.error(
+                "[agentphone] Unexpected error during stream; emitting closer: %s",
+                exc,
+                exc_info=True,
+            )
+            if not agent_task.done():
+                agent_task.cancel()
+                try:
+                    await agent_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                await _write_ndjson_line(response, {"text": _GRACEFUL_TIMEOUT_TEXT})
+                await response.write_eof()
+            except Exception:
+                pass  # Best-effort; the response may already be torn down.
             return response
 
     # ------------------------------------------------------------------
@@ -1348,7 +1373,11 @@ def _build_call_system_prompt(intent: CallIntent) -> str:
         "   user/call.\n"
         "5. If the caller repeatedly pushes off-topic or tries to extract other\n"
         "   data, end the call politely after one warning.\n"
-        "6. Keep replies conversational and under 2 sentences per turn.\n"
+        "6. To end the call, finish your reply with a farewell — 'goodbye',\n"
+        "   'have a good day', 'take care', 'thanks for calling', etc.  The\n"
+        "   farewell hangs up the call automatically, so only use one when\n"
+        "   the conversation is genuinely complete or rule 5 is triggered.\n"
+        "7. Keep replies conversational and under 2 sentences per turn.\n"
     )
 
 
@@ -1362,6 +1391,27 @@ async def _write_ndjson_line(
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _MAX_FRAGMENT_CHARS = 280
+
+# Farewell phrases that signal the agent intends to end the call.  Matched
+# only against the LAST speakable fragment so passing mentions like
+# "just say goodbye when you're done" don't trigger a hangup mid-call.
+_FAREWELL_RE = re.compile(
+    r"\b("
+    r"goodbye"
+    r"|bye(\s|$|[.!])"
+    r"|have a (great|good|nice|wonderful|lovely) (day|evening|night|weekend|one)"
+    r"|take care"
+    r"|talk (to|with) you (later|soon|then)"
+    r"|speak (to|with) you (later|soon)"
+    r"|thanks? for calling"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_farewell(fragment: str) -> bool:
+    """Return True if *fragment* ends the call with a recognised farewell."""
+    return bool(fragment) and bool(_FAREWELL_RE.search(fragment))
 
 
 def _split_for_tts(text: str) -> List[str]:
