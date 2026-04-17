@@ -2158,6 +2158,127 @@ class TestPostCallSummary:
         assert interaction.ended is True
 
     @pytest.mark.asyncio
+    async def test_summary_includes_recorded_conversation_transcript(self):
+        """The post-call summary delivered to the origin should include the
+        per-turn transcript captured during the call, not just the call's
+        purpose + AgentPhone's own summary."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from gateway.config import Platform
+        from gateway.platforms.base import SendResult
+
+        adapter = _make_adapter()
+        target_adapter = MagicMock()
+        target_adapter.send = AsyncMock(return_value=SendResult(success=True))
+        adapter.gateway_runner = MagicMock()
+        adapter.gateway_runner.adapters = {Platform.TELEGRAM: target_adapter}
+
+        interaction = self._seed_interaction(adapter, "call_with_transcript")
+        # Simulate two completed turns having been captured during the call.
+        interaction.transcript.extend([
+            ("Caller", "We're going to Texas Roadhouse tonight."),
+            ("Agent", "Oh, that sounds great. Have a wonderful dinner!"),
+            ("Caller", "Thanks. Bye."),
+            ("Agent", "Bye, enjoy!"),
+        ])
+
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await self._post_event(
+                cli, self._ended_payload(call_id="call_with_transcript")
+            )
+            assert resp.status == 200
+
+        for _ in range(20):
+            if target_adapter.send.await_count:
+                break
+            await asyncio.sleep(0.01)
+
+        summary_text = target_adapter.send.call_args[0][1]
+        assert "Conversation:" in summary_text
+        assert "Caller: We're going to Texas Roadhouse tonight." in summary_text
+        assert "Agent: Oh, that sounds great. Have a wonderful dinner!" in summary_text
+        assert "Caller: Thanks. Bye." in summary_text
+        assert "Agent: Bye, enjoy!" in summary_text
+
+    @pytest.mark.asyncio
+    async def test_summary_omits_conversation_section_when_empty(self):
+        """If the call ended before any turn was completed (e.g. immediate
+        hangup), the summary should NOT show an empty Conversation: header."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from gateway.config import Platform
+        from gateway.platforms.base import SendResult
+
+        adapter = _make_adapter()
+        target_adapter = MagicMock()
+        target_adapter.send = AsyncMock(return_value=SendResult(success=True))
+        adapter.gateway_runner = MagicMock()
+        adapter.gateway_runner.adapters = {Platform.TELEGRAM: target_adapter}
+
+        # No transcript appended; default empty list.
+        self._seed_interaction(adapter, "call_no_transcript")
+
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await self._post_event(
+                cli, self._ended_payload(call_id="call_no_transcript")
+            )
+            assert resp.status == 200
+
+        for _ in range(20):
+            if target_adapter.send.await_count:
+                break
+            await asyncio.sleep(0.01)
+
+        summary_text = target_adapter.send.call_args[0][1]
+        assert "Conversation:" not in summary_text
+
+    @pytest.mark.asyncio
+    async def test_streaming_turn_records_transcript_into_interaction(self):
+        """Each completed agent turn should append (Caller, Agent) to the
+        interaction's transcript so the post-call summary can show what
+        was actually discussed."""
+        from gateway.platforms.agentphone import (
+            CallIntent,
+            CallInteraction,
+        )
+
+        adapter = _make_adapter()
+        # Pre-seed an interaction so the inbound webhook reuses it.
+        adapter._interactions["call_xcript_001"] = CallInteraction(
+            intent=CallIntent(intent="Test"),
+        )
+
+        async def _handler(event):
+            return '{"message": "Got it, thanks!", "end_call": false}'
+
+        adapter._message_handler = _handler
+
+        payload = _inbound_payload(
+            call_id="call_xcript_001",
+            transcript="What's the time?",
+        )
+        body = json.dumps(payload).encode()
+        ts = int(time.time())
+        headers = {
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": str(ts),
+            "X-Webhook-Signature": _sign(body, ts),
+        }
+
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(WEBHOOK_PATH, data=body, headers=headers)
+            assert resp.status == 200
+
+        interaction = adapter._interactions["call_xcript_001"]
+        assert interaction.transcript == [
+            ("Caller", "What's the time?"),
+            ("Agent", "Got it, thanks!"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_disconnection_reason_agent_hangup(self):
         from unittest.mock import AsyncMock, MagicMock
 
