@@ -591,6 +591,47 @@ class TestAuthorizationMaps:
         )
         assert runner._is_user_authorized(denied) is False
 
+    def test_agent_own_number_implicitly_allowed(self, monkeypatch):
+        """Outbound-call conversation turns arrive with from=AGENTPHONE_AGENT_PHONENUMBER.
+        The gateway must allow them even if that number isn't in
+        AGENTPHONE_ALLOWED_INBOUND_NUMBERS, mirroring the adapter's
+        _is_allowed_inbound logic."""
+        from unittest.mock import MagicMock
+
+        import gateway.run as gw_run
+        from gateway.session import SessionSource
+
+        monkeypatch.setenv("AGENTPHONE_AGENT_PHONENUMBER", "+15551234567")
+        monkeypatch.setenv(
+            "AGENTPHONE_ALLOWED_INBOUND_NUMBERS", "+15559876543"
+        )
+        monkeypatch.delenv("AGENTPHONE_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+
+        runner = gw_run.GatewayRunner.__new__(gw_run.GatewayRunner)
+        runner.pairing_store = MagicMock()
+        runner.pairing_store.is_approved = MagicMock(return_value=False)
+
+        # Agent's own number arrives as user_id on outbound-call turns.
+        outbound_turn = SessionSource(
+            platform=Platform.AGENTPHONE,
+            chat_id="call_z",
+            chat_type="voice",
+            user_id="+15551234567",
+        )
+        assert runner._is_user_authorized(outbound_turn) is True
+
+        # The implicit allowance is scoped to AgentPhone — same number on
+        # another platform stays subject to that platform's allowlist.
+        other_platform = SessionSource(
+            platform=Platform.SMS,
+            chat_id="sms_x",
+            chat_type="dm",
+            user_id="+15551234567",
+        )
+        assert runner._is_user_authorized(other_platform) is False
+
 
 # ---------------------------------------------------------------------------
 # send() skeleton behaviour (Step B: not yet implemented)

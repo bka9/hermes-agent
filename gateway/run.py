@@ -2646,6 +2646,16 @@ class GatewayRunner:
         if self.pairing_store.is_approved(platform_name, user_id):
             return True
 
+        # AgentPhone: outbound-call conversation turns arrive with
+        # from=AGENTPHONE_AGENT_PHONENUMBER (the agent's own number, not
+        # the caller's).  The adapter implicitly allows this
+        # (gateway/platforms/agentphone.py:_is_allowed_inbound); mirror
+        # that here so the gateway doesn't deny turns the adapter accepted.
+        if source.platform == Platform.AGENTPHONE:
+            agent_phone = os.getenv("AGENTPHONE_AGENT_PHONENUMBER", "").strip()
+            if agent_phone and user_id == agent_phone:
+                return True
+
         # Check platform-specific and global allowlists
         platform_allowlist = os.getenv(platform_env_map.get(source.platform, ""), "").strip()
         global_allowlist = os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
