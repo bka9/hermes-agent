@@ -9545,7 +9545,7 @@ class GatewayRunner:
                     session_key=session_key,
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
-                    channel_prompt=pending_event.channel_prompt,
+                    channel_prompt=getattr(pending_event, "channel_prompt", None),
                 )
         finally:
             # Stop progress sender, interrupt monitor, and notification task
