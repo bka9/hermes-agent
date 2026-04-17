@@ -75,13 +75,65 @@ MAX_BODY_BYTES = 256 * 1024
 # AgentPhone documents a 30-second webhook timeout.  Finish under that with
 # a buffer so the final chunk definitely makes it on the wire.
 WALL_CLOCK_SECONDS = 25.0
-# After this many seconds with no output, keep the call alive with an
-# interim placeholder so AgentPhone doesn't abort on silence.
+# How long to wait before the FIRST filler.  AgentPhone will hang up on
+# silence past about 2s, so we slip something on the wire well before then.
 FIRST_CHUNK_DEADLINE_SECONDS = 1.5
-_KEEPALIVE_TEXT = "One moment."
+# Spacing between subsequent fillers while the agent is still working.
+# ~6s leaves ~4-5s of silence between filler phrases (the longer narrations
+# take ~2-4s of TTS), which feels conversational rather than anxious.
+FILLER_INTERVAL_SECONDS = 6.0
+
+# Filler phrases tiered by how deep into the wait we are.  We escalate from
+# short discourse markers → professional acknowledgments → longer
+# narrations so the pause feels conversational instead of canned.
+_FILLER_TIERS: List[List[str]] = [
+    # Tier 0: short discourse markers — first filler, ~1.5s into the wait.
+    [
+        "Hmm",
+        "Let's see",
+        "You know",
+        "So...",
+        "Well",
+        "Right, so",
+        "Okaaay",
+        "Sooo",
+    ],
+    # Tier 1: professional acknowledgments — second filler, ~7.5s into wait.
+    [
+        "Let me think about that for a moment",
+        "That's a good question — give me a second to consider it",
+        "Hmm, let me work through that",
+        "One moment while I gather my thoughts",
+        "That's an interesting point",
+    ],
+    # Tier 2: longer narrations — third+ filler, ~13.5s+ into wait.
+    [
+        "I want to make sure I give you a complete answer, so let me think through this",
+        "There are a few angles here — let me work through them",
+        "I'm trying to figure out the best way to explain this",
+    ],
+]
+
 _GRACEFUL_TIMEOUT_TEXT = (
     "Sorry, I'm taking longer than expected. Let me follow up shortly."
 )
+
+
+def _pick_filler(filler_index: int, last_choice: Optional[str]) -> str:
+    """Pick a filler phrase for the *filler_index*-th wait beat.
+
+    Escalates through the tiers (short → professional → narrative) and
+    avoids repeating the previous choice so the variety holds up across
+    a long wait.
+    """
+    import random
+
+    tier_idx = min(filler_index, len(_FILLER_TIERS) - 1)
+    tier = _FILLER_TIERS[tier_idx]
+    candidates = [f for f in tier if f != last_choice]
+    if not candidates:
+        candidates = list(tier)
+    return random.choice(candidates)
 
 # Call-intent scoping ("interaction memory")
 DEFAULT_MAX_TURNS = 12
@@ -959,40 +1011,50 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         self._background_tasks.add(agent_task)
         agent_task.add_done_callback(self._background_tasks.discard)
 
-        keepalive_sent = False
         try:
             # Race the agent against the first-chunk deadline; if the agent
-            # isn't done yet, emit a keepalive line to reserve the call.
+            # isn't done yet, drop into a filler loop so the caller hears
+            # conversational beats instead of dead air.
             try:
                 reply = await asyncio.wait_for(
                     asyncio.shield(agent_task),
                     timeout=FIRST_CHUNK_DEADLINE_SECONDS,
                 )
             except asyncio.TimeoutError:
-                await _write_ndjson_line(
-                    response, {"text": _KEEPALIVE_TEXT, "interim": True}
+                loop_deadline = (
+                    asyncio.get_event_loop().time()
+                    + (WALL_CLOCK_SECONDS - FIRST_CHUNK_DEADLINE_SECONDS)
                 )
-                keepalive_sent = True
-                # Wait out the remaining wall-clock budget for the agent.
-                try:
-                    reply = await asyncio.wait_for(
-                        agent_task,
-                        timeout=max(
-                            0.1,
-                            WALL_CLOCK_SECONDS - FIRST_CHUNK_DEADLINE_SECONDS,
-                        ),
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[agentphone] Agent exceeded %.1fs; emitting graceful closer",
-                        WALL_CLOCK_SECONDS,
-                    )
-                    agent_task.cancel()
+                filler_index = 0
+                last_filler: Optional[str] = None
+                reply = None
+                while reply is None:
+                    filler = _pick_filler(filler_index, last_filler)
                     await _write_ndjson_line(
-                        response, {"text": _GRACEFUL_TIMEOUT_TEXT}
+                        response, {"text": filler, "interim": True}
                     )
-                    await response.write_eof()
-                    return response
+                    last_filler = filler
+                    filler_index += 1
+                    remaining = loop_deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        logger.warning(
+                            "[agentphone] Agent exceeded %.1fs; emitting graceful closer",
+                            WALL_CLOCK_SECONDS,
+                        )
+                        agent_task.cancel()
+                        await _write_ndjson_line(
+                            response, {"text": _GRACEFUL_TIMEOUT_TEXT}
+                        )
+                        await response.write_eof()
+                        return response
+                    try:
+                        reply = await asyncio.wait_for(
+                            asyncio.shield(agent_task),
+                            timeout=min(FILLER_INTERVAL_SECONDS, remaining),
+                        )
+                    except asyncio.TimeoutError:
+                        # Still working — loop emits another filler.
+                        continue
 
             spoken_text, end_call = _parse_call_reply(reply)
             fragments = _split_for_tts(spoken_text)
