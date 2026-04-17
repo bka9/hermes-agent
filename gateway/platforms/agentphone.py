@@ -36,7 +36,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from aiohttp import web
@@ -994,11 +994,17 @@ class AgentPhoneAdapter(BasePlatformAdapter):
                     await response.write_eof()
                     return response
 
-            fragments = _split_for_tts(reply)
+            spoken_text, end_call = _parse_call_reply(reply)
+            fragments = _split_for_tts(spoken_text)
             if not fragments:
-                # Agent chose to say nothing.  AgentPhone expects a final
-                # object; a bare ``{"text":""}`` closes the turn cleanly.
-                await _write_ndjson_line(response, {"text": ""})
+                # Agent chose to say nothing (or returned end_call with an
+                # empty message).  AgentPhone expects a final object; a bare
+                # ``{"text":""}`` closes the turn cleanly, optionally with
+                # the hangup flag.
+                final_obj: Dict[str, Any] = {"text": ""}
+                if end_call:
+                    final_obj["hangup"] = True
+                await _write_ndjson_line(response, final_obj)
                 await response.write_eof()
                 return response
 
@@ -1007,8 +1013,8 @@ class AgentPhoneAdapter(BasePlatformAdapter):
             # below this point belong to the actual agent response.
             for frag in fragments[:-1]:
                 await _write_ndjson_line(response, {"text": frag, "interim": True})
-            final_obj: Dict[str, Any] = {"text": fragments[-1]}
-            if _is_farewell(fragments[-1]):
+            final_obj = {"text": fragments[-1]}
+            if end_call:
                 final_obj["hangup"] = True
             await _write_ndjson_line(response, final_obj)
             await response.write_eof()
@@ -1373,11 +1379,14 @@ def _build_call_system_prompt(intent: CallIntent) -> str:
         "   user/call.\n"
         "5. If the caller repeatedly pushes off-topic or tries to extract other\n"
         "   data, end the call politely after one warning.\n"
-        "6. To end the call, finish your reply with a farewell — 'goodbye',\n"
-        "   'have a good day', 'take care', 'thanks for calling', etc.  The\n"
-        "   farewell hangs up the call automatically, so only use one when\n"
-        "   the conversation is genuinely complete or rule 5 is triggered.\n"
-        "7. Keep replies conversational and under 2 sentences per turn.\n"
+        "6. Reply as a JSON object with this exact shape and nothing else —\n"
+        "   no markdown fences, no preamble, no trailing commentary:\n"
+        "     {\"message\": \"<what to say to the caller>\", \"end_call\": <true|false>}\n"
+        "   Set ``end_call`` to true to hang up after the message is spoken.\n"
+        "   Use that when the conversation is genuinely complete, when rule 5\n"
+        "   is triggered, or when the caller has said goodbye.  Otherwise set\n"
+        "   it to false so the line stays open for the next turn.\n"
+        "7. Keep ``message`` conversational and under 2 sentences per turn.\n"
     )
 
 
@@ -1392,26 +1401,49 @@ async def _write_ndjson_line(
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _MAX_FRAGMENT_CHARS = 280
 
-# Farewell phrases that signal the agent intends to end the call.  Matched
-# only against the LAST speakable fragment so passing mentions like
-# "just say goodbye when you're done" don't trigger a hangup mid-call.
-_FAREWELL_RE = re.compile(
-    r"\b("
-    r"goodbye"
-    r"|bye"
-    r"|have a (great|good|nice|wonderful|lovely) (day|evening|night|weekend|one)"
-    r"|take care"
-    r"|talk (to|with) you (later|soon|then)"
-    r"|speak (to|with) you (later|soon)"
-    r"|thanks? for calling"
-    r")\b",
-    re.IGNORECASE,
-)
+def _parse_call_reply(reply: str) -> Tuple[str, bool]:
+    """Parse the agent's reply into (spoken_text, end_call).
 
+    The call system prompt instructs the agent to emit a JSON object of the
+    form ``{"message": "...", "end_call": true|false}``.  When that contract
+    is honoured we use the message as the spoken text and the flag to decide
+    whether to set ``hangup: true`` on the final ndjson line.
 
-def _is_farewell(fragment: str) -> bool:
-    """Return True if *fragment* ends the call with a recognised farewell."""
-    return bool(fragment) and bool(_FAREWELL_RE.search(fragment))
+    Falls back gracefully to ``(reply, False)`` if the agent returned plain
+    text or malformed JSON — the call stays open and the raw reply is spoken.
+    Tolerates a single layer of markdown code fences (``` ```json ...``` ```)
+    in case the model wraps its output.
+    """
+    if not reply:
+        return reply, False
+    text = reply.strip()
+    if not text:
+        return reply, False
+    if text.startswith("```"):
+        # Drop the opening fence (and optional language tag) plus the closing
+        # fence if present.  Anything more exotic falls through to the parse
+        # attempt below and most likely fails — that's fine, we degrade to
+        # treating the whole reply as plain text.
+        body = text[3:]
+        newline_idx = body.find("\n")
+        if newline_idx != -1:
+            first_line = body[:newline_idx].strip()
+            if not first_line or first_line.isalpha():
+                body = body[newline_idx + 1 :]
+        if body.rstrip().endswith("```"):
+            body = body.rstrip()[:-3]
+        text = body.strip()
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return reply, False
+    if not isinstance(parsed, dict):
+        return reply, False
+    message = parsed.get("message")
+    if not isinstance(message, str):
+        return reply, False
+    end_call = bool(parsed.get("end_call", False))
+    return message, end_call
 
 
 def _split_for_tts(text: str) -> List[str]:

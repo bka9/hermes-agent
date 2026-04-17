@@ -798,11 +798,11 @@ class TestStreamingReply:
         assert lines == [{"text": ""}]
 
     @pytest.mark.asyncio
-    async def test_farewell_in_final_fragment_sets_hangup(self):
+    async def test_structured_reply_with_end_call_sets_hangup(self):
         adapter = _make_adapter()
 
         async def _handler(event):
-            return "Sounds good. Goodbye!"
+            return '{"message": "Sounds good. Have a great day!", "end_call": true}'
 
         adapter._message_handler = _handler
 
@@ -813,16 +813,14 @@ class TestStreamingReply:
 
         lines = self._parse_ndjson(raw)
         assert lines[0] == {"text": "Sounds good.", "interim": True}
-        assert lines[-1] == {"text": "Goodbye!", "hangup": True}
+        assert lines[-1] == {"text": "Have a great day!", "hangup": True}
 
     @pytest.mark.asyncio
-    async def test_farewell_only_in_earlier_fragment_does_not_hangup(self):
+    async def test_structured_reply_without_end_call_stays_open(self):
         adapter = _make_adapter()
 
         async def _handler(event):
-            # "goodbye" appears in fragment 0, but the LAST fragment is a
-            # follow-up question — call should stay open.
-            return "Just say goodbye when you're done. Anything else?"
+            return '{"message": "Sure, anything else?", "end_call": false}'
 
         adapter._message_handler = _handler
 
@@ -832,6 +830,27 @@ class TestStreamingReply:
             raw = await resp.read()
 
         lines = self._parse_ndjson(raw)
+        assert lines == [{"text": "Sure, anything else?"}]
+        assert "hangup" not in lines[-1]
+
+    @pytest.mark.asyncio
+    async def test_plain_text_reply_falls_back_to_speaking_it(self):
+        """Models that ignore the JSON contract still get heard — we just
+        can't end the call until they comply."""
+        adapter = _make_adapter()
+
+        async def _handler(event):
+            return "Goodbye!"  # not JSON
+
+        adapter._message_handler = _handler
+
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await self._post_valid(cli)
+            raw = await resp.read()
+
+        lines = self._parse_ndjson(raw)
+        assert lines == [{"text": "Goodbye!"}]
         assert "hangup" not in lines[-1]
 
     @pytest.mark.asyncio
@@ -859,25 +878,72 @@ class TestStreamingReply:
         assert "interim" not in lines[-1]
 
 
-class TestFarewellDetection:
-    def test_common_farewells_match(self):
-        from gateway.platforms.agentphone import _is_farewell
+class TestParseCallReply:
+    def test_structured_reply_with_end_call_true(self):
+        from gateway.platforms.agentphone import _parse_call_reply
 
-        assert _is_farewell("Goodbye!")
-        assert _is_farewell("Have a great day.")
-        assert _is_farewell("Take care.")
-        assert _is_farewell("Talk to you later.")
-        assert _is_farewell("Thanks for calling!")
-        assert _is_farewell("Bye.")
+        text, end_call = _parse_call_reply(
+            '{"message": "Take care!", "end_call": true}'
+        )
+        assert text == "Take care!"
+        assert end_call is True
 
-    def test_non_farewells_do_not_match(self):
-        from gateway.platforms.agentphone import _is_farewell
+    def test_structured_reply_with_end_call_false(self):
+        from gateway.platforms.agentphone import _parse_call_reply
 
-        assert not _is_farewell("How can I help?")
-        assert not _is_farewell("Sure, that works.")
-        assert not _is_farewell("")
-        # Mid-sentence mentions of "bye" inside other words shouldn't trigger.
-        assert not _is_farewell("Maybe we should reschedule.")
+        text, end_call = _parse_call_reply(
+            '{"message": "Sure, what else?", "end_call": false}'
+        )
+        assert text == "Sure, what else?"
+        assert end_call is False
+
+    def test_structured_reply_default_end_call_is_false(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        text, end_call = _parse_call_reply('{"message": "Hi"}')
+        assert text == "Hi"
+        assert end_call is False
+
+    def test_markdown_code_fence_is_stripped(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        text, end_call = _parse_call_reply(
+            '```json\n{"message": "Bye!", "end_call": true}\n```'
+        )
+        assert text == "Bye!"
+        assert end_call is True
+
+    def test_plain_text_falls_back_unchanged(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        text, end_call = _parse_call_reply("Hello there.")
+        assert text == "Hello there."
+        assert end_call is False
+
+    def test_malformed_json_falls_back_to_raw(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        # Looks like JSON but isn't valid — we should speak the raw reply
+        # rather than swallowing it.
+        bogus = '{"message": "Hi" "end_call":'
+        text, end_call = _parse_call_reply(bogus)
+        assert text == bogus
+        assert end_call is False
+
+    def test_json_array_falls_back(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        # Valid JSON but not the expected object shape.
+        text, end_call = _parse_call_reply('["hi"]')
+        assert text == '["hi"]'
+        assert end_call is False
+
+    def test_empty_reply(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        text, end_call = _parse_call_reply("")
+        assert text == ""
+        assert end_call is False
 
 
 class TestSentenceSplitter:
