@@ -15071,7 +15071,7 @@ Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
                     run_generation=run_generation,
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
-                    channel_prompt=next_channel_prompt,
+channel_prompt=getattr(pending_event, "channel_prompt", None),
                 )
         finally:
             # Stop progress sender, interrupt monitor, and notification task
