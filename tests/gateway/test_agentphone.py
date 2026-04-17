@@ -726,9 +726,9 @@ class TestStreamingReply:
         assert lines == [{"text": "Yes."}]
 
     @pytest.mark.asyncio
-    async def test_slow_agent_emits_keepalive_interim(self, monkeypatch):
+    async def test_slow_agent_emits_filler_interim(self, monkeypatch):
         """If the agent hasn't replied by the first-chunk deadline, the
-        adapter emits a keepalive interim line so AgentPhone doesn't hang
+        adapter emits a filler line from tier 0 so AgentPhone doesn't hang
         up on silence."""
         from gateway.platforms import agentphone as ap_mod
 
@@ -748,9 +748,47 @@ class TestStreamingReply:
             raw = await resp.read()
 
         lines = self._parse_ndjson(raw)
-        assert lines[0] == {"text": ap_mod._KEEPALIVE_TEXT, "interim": True}
+        # First line is a tier-0 filler (random pick from the pool).
+        assert lines[0]["interim"] is True
+        assert lines[0]["text"] in ap_mod._FILLER_TIERS[0]
         # Final line is the agent's real reply (no interim).
         assert lines[-1] == {"text": "Sorry for the delay."}
+
+    @pytest.mark.asyncio
+    async def test_long_wait_emits_multiple_fillers_escalating_tiers(
+        self, monkeypatch
+    ):
+        """A wait long enough to span multiple filler intervals should
+        emit fillers from successively higher tiers (short → professional
+        → narrative)."""
+        from gateway.platforms import agentphone as ap_mod
+
+        monkeypatch.setattr(ap_mod, "FIRST_CHUNK_DEADLINE_SECONDS", 0.02)
+        monkeypatch.setattr(ap_mod, "FILLER_INTERVAL_SECONDS", 0.05)
+        monkeypatch.setattr(ap_mod, "WALL_CLOCK_SECONDS", 1.0)
+
+        adapter = _make_adapter()
+
+        async def _handler(event):
+            # ~0.18s puts us through tier-0, tier-1, and at least one
+            # tier-2 filler before the agent returns.
+            await asyncio.sleep(0.18)
+            return "Done thinking."
+
+        adapter._message_handler = _handler
+
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await self._post_valid(cli)
+            raw = await resp.read()
+
+        lines = self._parse_ndjson(raw)
+        filler_lines = [ln for ln in lines if ln.get("interim")]
+        assert len(filler_lines) >= 3, filler_lines
+        assert filler_lines[0]["text"] in ap_mod._FILLER_TIERS[0]
+        assert filler_lines[1]["text"] in ap_mod._FILLER_TIERS[1]
+        assert filler_lines[2]["text"] in ap_mod._FILLER_TIERS[2]
+        assert lines[-1] == {"text": "Done thinking."}
 
     @pytest.mark.asyncio
     async def test_wall_clock_timeout_emits_graceful_closer(self, monkeypatch):
@@ -876,6 +914,38 @@ class TestStreamingReply:
         lines = self._parse_ndjson(raw)
         assert lines[-1] == {"text": ap_mod._GRACEFUL_TIMEOUT_TEXT}
         assert "interim" not in lines[-1]
+
+
+class TestFillerPicker:
+    def test_first_filler_comes_from_tier_zero(self):
+        from gateway.platforms.agentphone import _FILLER_TIERS, _pick_filler
+
+        # Many trials: every choice at index 0 must be a tier-0 phrase.
+        for _ in range(50):
+            assert _pick_filler(0, None) in _FILLER_TIERS[0]
+
+    def test_second_filler_comes_from_tier_one(self):
+        from gateway.platforms.agentphone import _FILLER_TIERS, _pick_filler
+
+        for _ in range(50):
+            assert _pick_filler(1, None) in _FILLER_TIERS[1]
+
+    def test_high_index_clamps_to_last_tier(self):
+        from gateway.platforms.agentphone import _FILLER_TIERS, _pick_filler
+
+        for _ in range(50):
+            # Anything past tier 2 stays in tier 2.
+            assert _pick_filler(99, None) in _FILLER_TIERS[-1]
+
+    def test_avoids_immediate_repeat(self):
+        from gateway.platforms.agentphone import _pick_filler
+
+        # 50 picks at the same tier should never repeat the previous choice.
+        last = None
+        for _ in range(50):
+            choice = _pick_filler(1, last)
+            assert choice != last
+            last = choice
 
 
 class TestParseCallReply:
