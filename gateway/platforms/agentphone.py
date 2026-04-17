@@ -1398,7 +1398,7 @@ _MAX_FRAGMENT_CHARS = 280
 _FAREWELL_RE = re.compile(
     r"\b("
     r"goodbye"
-    r"|bye(\s|$|[.!])"
+    r"|bye"
     r"|have a (great|good|nice|wonderful|lovely) (day|evening|night|weekend|one)"
     r"|take care"
     r"|talk (to|with) you (later|soon|then)"
