@@ -4366,6 +4366,14 @@ class AIAgent:
                 self._client_log_context(),
             )
             return client
+        # Local copy: callers (notably _replace_primary_openai_client and
+        # _create_request_openai_client) pass self._client_kwargs by
+        # reference.  Mutating it here would store a single httpx.Client in
+        # the shared dict; subsequent calls would reuse it, and once that
+        # one client gets close()d every "fresh" OpenAI() instance would
+        # fail with RuntimeError("Cannot send a request, as the client has
+        # been closed.").
+        client_kwargs = dict(client_kwargs)
         # Inject TCP keepalives to detect dead connections faster (#10324).
         # Without keepalives, a provider that drops mid-stream leaves the
         # socket in CLOSE-WAIT and epoll_wait may never fire, causing the
