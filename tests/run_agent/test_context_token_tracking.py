@@ -59,11 +59,7 @@ def _make_agent(monkeypatch, api_mode, provider, response_fn):
             self._disable_streaming = True
             return super().run_conversation(msg, conversation_history=conversation_history, task_id=task_id)
 
-    extra = {}
-    if api_mode not in ("anthropic_messages",):
-        extra["base_url"] = "https://openrouter.ai/api/v1"
-
-    return _A(model="test-model", api_key="test-key", provider=provider, api_mode=api_mode, **extra)
+    return _A(model="test-model", api_key="test-key", base_url="http://localhost:1234/v1", provider=provider, api_mode=api_mode)
 
 
 def _anthropic_resp(input_tok, output_tok, cache_read=0, cache_creation=0):

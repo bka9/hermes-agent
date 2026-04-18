@@ -373,7 +373,11 @@ def run_doctor(args):
     print(color("◆ Auth Providers", Colors.CYAN, Colors.BOLD))
 
     try:
-        from hermes_cli.auth import get_nous_auth_status, get_codex_auth_status
+        from hermes_cli.auth import (
+            get_nous_auth_status,
+            get_codex_auth_status,
+            get_gemini_oauth_auth_status,
+        )
 
         nous_status = get_nous_auth_status()
         if nous_status.get("logged_in"):
@@ -388,6 +392,20 @@ def run_doctor(args):
             check_warn("OpenAI Codex auth", "(not logged in)")
             if codex_status.get("error"):
                 check_info(codex_status["error"])
+
+        gemini_status = get_gemini_oauth_auth_status()
+        if gemini_status.get("logged_in"):
+            email = gemini_status.get("email") or ""
+            project = gemini_status.get("project_id") or ""
+            pieces = []
+            if email:
+                pieces.append(email)
+            if project:
+                pieces.append(f"project={project}")
+            suffix = f" ({', '.join(pieces)})" if pieces else ""
+            check_ok("Google Gemini OAuth", f"(logged in{suffix})")
+        else:
+            check_warn("Google Gemini OAuth", "(not logged in)")
     except Exception as e:
         check_warn("Auth provider status", f"(could not check: {e})")
 
@@ -807,6 +825,7 @@ def run_doctor(args):
         ("Arcee AI",         ("ARCEEAI_API_KEY",),                            "https://api.arcee.ai/api/v1/models",  "ARCEE_BASE_URL", True),
         ("DeepSeek",         ("DEEPSEEK_API_KEY",),                           "https://api.deepseek.com/v1/models",  "DEEPSEEK_BASE_URL", True),
         ("Hugging Face",     ("HF_TOKEN",),                                   "https://router.huggingface.co/v1/models", "HF_BASE_URL", True),
+        ("NVIDIA NIM",       ("NVIDIA_API_KEY",),                             "https://integrate.api.nvidia.com/v1/models", "NVIDIA_BASE_URL", True),
         ("Alibaba/DashScope", ("DASHSCOPE_API_KEY",),                         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models", "DASHSCOPE_BASE_URL", True),
         # MiniMax: the /anthropic endpoint doesn't support /models, but the /v1 endpoint does.
         ("MiniMax",          ("MINIMAX_API_KEY",),                            "https://api.minimax.io/v1/models",    "MINIMAX_BASE_URL", True),
@@ -876,8 +895,8 @@ def run_doctor(args):
                 _model_count = len(_br_resp.get("modelSummaries", []))
                 print(f"\r  {color('✓', Colors.GREEN)} {_label} {color(f'({_auth_var}, {_region}, {_model_count} models)', Colors.DIM)}           ")
             except ImportError:
-                print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color('(boto3 not installed — pip install hermes-agent[bedrock])', Colors.DIM)}           ")
-                issues.append("Install boto3 for Bedrock: pip install hermes-agent[bedrock]")
+                print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'(boto3 not installed — {sys.executable} -m pip install boto3)', Colors.DIM)}           ")
+                issues.append(f"Install boto3 for Bedrock: {sys.executable} -m pip install boto3")
             except Exception as _e:
                 _err_name = type(_e).__name__
                 print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'({_err_name}: {_e})', Colors.DIM)}           ")
