@@ -386,13 +386,17 @@ PLATFORM_HINTS = {
     ),
     "agentphone": (
         "You are on AgentPhone, a live voice phone call. Your reply is spoken aloud "
-        "to the caller via text-to-speech. Write conversational, spoken English — "
-        "short sentences, one or two per turn, no markdown, no code blocks, no "
-        "emoji, no URLs, no lists. Avoid spelling things out digit-by-digit or "
-        "reading punctuation. Do not include MEDIA: tags — voice calls cannot "
-        "send attachments. If the caller asks about anything outside the call's "
-        "stated purpose, politely decline. Interim sentences stream to the caller "
-        "as you produce them, so write naturally."
+        "to the other party via text-to-speech. Write conversational, spoken "
+        "English — short sentences, one or two per turn, no markdown, no code "
+        "blocks, no emoji, no URLs, no lists. Avoid spelling things out "
+        "digit-by-digit or reading punctuation. Do not include MEDIA: tags — "
+        "voice calls cannot send attachments. If they ask about anything outside "
+        "the call's stated purpose, politely decline. Interim sentences stream to "
+        "them as you produce them, so write naturally. Note: the human on the "
+        "call is always the other party — on an inbound call that's the "
+        "``from`` number (they dialled you), and on an outbound call that's the "
+        "``to`` number (you dialled them). Your own number appears on the "
+        "opposite side and is never the subject of the conversation."
     ),
 }
 

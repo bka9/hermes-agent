@@ -14,7 +14,9 @@ from gateway.platforms.agentphone import (
     AgentPhoneAdapter,
     WEBHOOK_PATH,
     _extract_call_id,
+    _extract_direction,
     _extract_from_number,
+    _extract_to_number,
     _extract_transcript,
     _redact_phone,
     normalize_e164,
@@ -234,6 +236,7 @@ def _record_reply(capture, reply=""):
 def _inbound_payload(
     *,
     from_number: str = ALLOWED_PHONE,
+    to_number: str = AGENT_PHONE,
     call_id: str = "call_abc123",
     transcript: str = "Hello, is anyone there?",
     channel: str = "voice",
@@ -243,7 +246,36 @@ def _inbound_payload(
         "event": "agent.message",
         "channel": channel,
         "callId": call_id,
+        "direction": "inbound",
         "from": from_number,
+        "to": to_number,
+        "data": {"transcript": transcript},
+        "recentHistory": [],
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _outbound_payload(
+    *,
+    to_number: str = ALLOWED_PHONE,
+    from_number: str = AGENT_PHONE,
+    call_id: str = "call_out_001",
+    transcript: str = "Hi, this is the caller speaking.",
+    channel: str = "voice",
+    extra: dict | None = None,
+) -> dict:
+    """Build an ``agent.message`` webhook representing a turn of an
+    agent-initiated outbound call: the agent's number lives in ``from``
+    and the human the agent dialled lives in ``to``."""
+    payload = {
+        "event": "agent.message",
+        "channel": channel,
+        "callId": call_id,
+        "direction": "outbound",
+        "from": from_number,
+        "to": to_number,
         "data": {"transcript": transcript},
         "recentHistory": [],
     }
@@ -288,6 +320,29 @@ class TestPayloadExtractors:
 
     def test_extract_from_number_missing(self):
         assert _extract_from_number({"data": {}}) is None
+
+    def test_extract_to_number_top_level(self):
+        assert _extract_to_number({"to": "+15551234567"}) == "+15551234567"
+
+    def test_extract_to_number_nested(self):
+        assert (
+            _extract_to_number({"data": {"to": "+15551234567"}})
+            == "+15551234567"
+        )
+
+    def test_extract_to_number_missing(self):
+        assert _extract_to_number({"data": {}}) is None
+
+    def test_extract_direction_top_level(self):
+        assert _extract_direction({"direction": "outbound"}) == "outbound"
+        assert _extract_direction({"direction": "INBOUND"}) == "inbound"
+
+    def test_extract_direction_nested(self):
+        assert _extract_direction({"data": {"direction": "outbound"}}) == "outbound"
+
+    def test_extract_direction_missing_or_invalid(self):
+        assert _extract_direction({}) is None
+        assert _extract_direction({"direction": "sideways"}) is None
 
     def test_extract_call_id_prefers_callId(self):
         payload = {"callId": "cid1", "id": "other"}
@@ -428,10 +483,23 @@ class TestFromNumberAllowlist:
             return resp.status
 
     @pytest.mark.asyncio
-    async def test_agent_phone_allowed(self):
+    async def test_outbound_bypasses_allowlist(self):
+        """An agent-initiated outbound webhook is accepted even though the
+        recipient in ``to`` isn't in the inbound allowlist — outbound is
+        unrestricted."""
         adapter = _make_adapter()
-        status = await self._post_as(adapter, AGENT_PHONE)
-        assert status == 200
+        app = _build_app(adapter)
+        payload = _outbound_payload(to_number="+15550000000")  # not allowlisted
+        body = json.dumps(payload).encode()
+        ts = int(time.time())
+        headers = {
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": str(ts),
+            "X-Webhook-Signature": _sign(body, ts),
+        }
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(WEBHOOK_PATH, data=body, headers=headers)
+            assert resp.status == 200
 
     @pytest.mark.asyncio
     async def test_allowlisted_number_allowed(self):
@@ -547,6 +615,82 @@ class TestInboundDispatch:
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(WEBHOOK_PATH, data=body, headers=headers)
             assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_outbound_uses_to_as_other_party(self):
+        """On an outbound webhook (agent dialled a human), the subject of
+        the turn is the recipient in ``to`` — not the agent's own number
+        in ``from``.  Exercises the inbound/outbound asymmetry: the
+        MessageEvent's ``user_id`` must be the recipient."""
+        adapter = _make_adapter()
+        captured: list[MessageEvent] = []
+
+        async def _capture(event: MessageEvent):
+            captured.append(event)
+
+        adapter._message_handler = _record_reply(_capture, reply="ok")
+
+        payload = _outbound_payload(
+            from_number=AGENT_PHONE,
+            to_number=ALLOWED_PHONE,
+            call_id="call_out_subject",
+            transcript="Thanks for calling me back!",
+        )
+        body = json.dumps(payload).encode()
+        ts = int(time.time())
+        headers = {
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": str(ts),
+            "X-Webhook-Signature": _sign(body, ts),
+        }
+
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(WEBHOOK_PATH, data=body, headers=headers)
+            assert resp.status == 200
+
+        await asyncio.sleep(0.05)
+        assert len(captured) == 1
+        event = captured[0]
+        # Subject of the turn is the human the agent dialled, not the
+        # agent's own number.
+        assert event.source.user_id == ALLOWED_PHONE
+        assert event.source.user_id != AGENT_PHONE
+
+    @pytest.mark.asyncio
+    async def test_outbound_without_explicit_direction_inferred(self):
+        """A payload missing an explicit ``direction`` but whose ``from``
+        matches the agent's own number is still treated as outbound."""
+        adapter = _make_adapter()
+        captured: list[MessageEvent] = []
+
+        async def _capture(event: MessageEvent):
+            captured.append(event)
+
+        adapter._message_handler = _record_reply(_capture, reply="ok")
+
+        payload = _outbound_payload(
+            from_number=AGENT_PHONE,
+            to_number=ALLOWED_PHONE,
+            call_id="call_out_inferred",
+        )
+        payload.pop("direction")
+
+        body = json.dumps(payload).encode()
+        ts = int(time.time())
+        headers = {
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": str(ts),
+            "X-Webhook-Signature": _sign(body, ts),
+        }
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(WEBHOOK_PATH, data=body, headers=headers)
+            assert resp.status == 200
+
+        await asyncio.sleep(0.05)
+        assert len(captured) == 1
+        assert captured[0].source.user_id == ALLOWED_PHONE
 
     @pytest.mark.asyncio
     async def test_malformed_json_returns_400(self):
