@@ -49,6 +49,17 @@ Then configure the webhook in the AgentPhone dashboard to POST to:
 https://<your-public-host>/agentphone/webhook
 ```
 
+## Webhook direction: `from` vs `to`
+
+Every AgentPhone webhook describes one turn of a live call, and which side of the `from` / `to` fields the human sits on depends on who placed the call:
+
+| Direction | Placed by | `from` | `to` | Human (subject of the turn) |
+|---|---|---|---|---|
+| **inbound** | A person dialling in | The caller | The agent's number | `from` |
+| **outbound** | The agent (via `send_message` / `send_message_tool`) | The agent's number | The person the agent dialled | `to` |
+
+The adapter resolves direction from the payload's `direction` field when present and falls back to inferring it by comparing `from` against `AGENTPHONE_AGENT_PHONENUMBER`. The "other party" is then passed through as the session's `user_id` / `user_name`, used for per-caller intent lookup, and (on inbound only) checked against `AGENTPHONE_ALLOWED_INBOUND_NUMBERS`. Outbound webhooks are never allowlist-gated — the agent is allowed to dial any valid E.164 number.
+
 ## How calls are scoped
 
 AgentPhone calls are different from chat messages: the recipient of a call is an unfamiliar person who may try to socially engineer the agent. Hermes applies four layers of defense:

@@ -13,6 +13,27 @@ AgentPhone (https://agentphone.to) is a phone-calls platform where:
 
 See docs.agentphone.to for the full contract.
 
+Inbound vs. outbound webhook shape
+----------------------------------
+
+Every webhook describes one turn of an ongoing call.  Which end of the
+line the "other party" (the human the agent is talking to) sits on
+depends on who placed the call:
+
+- **Inbound** (a human dialled the agent) — the caller is in ``from``
+  and the agent's own number is in ``to``.  The allowlist gates on the
+  ``from`` number.
+- **Outbound** (the agent dialled a human) — the agent's number is in
+  ``from`` and the recipient is in ``to``.  Outbound is unrestricted;
+  the allowlist does not apply.
+
+The adapter resolves direction from the payload's ``direction`` field
+when present, otherwise infers it by comparing ``from`` against the
+agent's configured phone number.  Everything that needs the human
+identity (session user_id, per-caller intent lookup, summary labels)
+uses ``other_party`` = ``to`` on outbound and ``from`` on inbound so
+the agent never sees its own number masquerading as the subject.
+
 This file implements the adapter skeleton for Step B of the rollout:
 
 - aiohttp webhook server with HMAC verification and replay protection
@@ -627,11 +648,21 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         # because its channel isn't ``voice`` in some future payload.
         event_type = str(payload.get("event") or "").strip()
         from_number = normalize_e164(_extract_from_number(payload))
+        to_number = normalize_e164(_extract_to_number(payload))
+        direction = self._resolve_direction(payload, from_number)
         call_id = _extract_call_id(payload)
+        # The human on the other end of the line, regardless of who
+        # placed the call.  On inbound the caller is in ``from``; on
+        # outbound the agent is in ``from`` and the human the agent
+        # dialled is in ``to``.
+        other_party = to_number if direction == "outbound" else from_number
 
         if event_type == "agent.call_ended":
             return await self._handle_call_ended(
-                payload, call_id=call_id, from_number=from_number
+                payload,
+                call_id=call_id,
+                other_party=other_party,
+                direction=direction,
             )
         if event_type == "agent.reaction":
             # Reactions aren't wired in v1 — ack so AgentPhone stops retrying.
@@ -657,29 +688,36 @@ class AgentPhoneAdapter(BasePlatformAdapter):
 
         transcript = _extract_transcript(payload)
 
-        if not from_number:
+        if not other_party:
             logger.warning(
-                "[agentphone] Missing/invalid from-number in webhook payload; rejecting"
+                "[agentphone] Missing/invalid %s-number in webhook payload; rejecting",
+                "to" if direction == "outbound" else "from",
             )
-            return web.json_response({"error": "Missing from-number"}, status=400)
+            field = "to" if direction == "outbound" else "from"
+            return web.json_response(
+                {"error": f"Missing {field}-number"}, status=400
+            )
 
-        if not self._is_allowed_inbound(from_number):
+        # Inbound calls must come from an allowlisted caller; outbound
+        # calls are unrestricted (the agent may dial any valid number).
+        if direction == "inbound" and not self._is_allowed_inbound(other_party):
             logger.warning(
                 "[agentphone] Rejecting inbound from %s (not in allowlist)",
-                _redact_phone(from_number),
+                _redact_phone(other_party),
             )
             return web.json_response({"error": "Forbidden"}, status=403)
 
         # Build the MessageEvent.  We key chat_id on the call id (or a
-        # fallback synthesised from the from-number + timestamp) so each
-        # call is its own session; the actual caller id lives in user_id.
-        chat_key = call_id or f"inbound:{from_number}:{int(time.time() * 1000)}"
+        # fallback synthesised from the other-party number + timestamp)
+        # so each call is its own session; the human's number lives in
+        # user_id regardless of who placed the call.
+        chat_key = call_id or f"{direction}:{other_party}:{int(time.time() * 1000)}"
         source = self.build_source(
             chat_id=chat_key,
-            chat_name=f"call/{_redact_phone(from_number)}",
+            chat_name=f"call/{_redact_phone(other_party)}",
             chat_type="voice",
-            user_id=from_number,
-            user_name=_redact_phone(from_number),
+            user_id=other_party,
+            user_name=_redact_phone(other_party),
             thread_id=call_id,
         )
         event = MessageEvent(
@@ -691,18 +729,19 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         )
 
         logger.info(
-            "[agentphone] Inbound call_id=%s from=%s transcript_len=%d",
+            "[agentphone] %s call_id=%s other_party=%s transcript_len=%d",
+            direction.capitalize(),
             call_id or "(none)",
-            _redact_phone(from_number),
+            _redact_phone(other_party),
             len(transcript or ""),
         )
 
-        # Lookup or create the per-interaction memory.  An inbound call
-        # that the agent itself placed will already have an interaction
-        # seeded by ``send()``; a first-time inbound from an allowlisted
-        # caller falls through to the default intent.
+        # Lookup or create the per-interaction memory.  An outbound call
+        # placed by the agent will already have an interaction seeded
+        # by ``send()``; a first-time inbound from an allowlisted caller
+        # falls through to the default intent (keyed on their number).
         interaction = self._get_or_create_interaction(
-            call_id=chat_key, from_number=from_number
+            call_id=chat_key, other_party=other_party
         )
 
         # Layer 4a — prompt-injection short circuit.  If the transcript
@@ -711,8 +750,8 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         # radius of the most obvious jailbreak attempts.
         if transcript and _scan_for_injection(transcript):
             logger.warning(
-                "[agentphone] Blocked injection attempt on call_id=%s from=%s",
-                chat_key, _redact_phone(from_number),
+                "[agentphone] Blocked injection attempt on call_id=%s other_party=%s",
+                chat_key, _redact_phone(other_party),
             )
             return await self._respond_canned(
                 request, _INJECTION_REFUSAL_TEXT, hangup=True
@@ -759,7 +798,8 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         payload: Dict[str, Any],
         *,
         call_id: Optional[str],
-        from_number: Optional[str],
+        other_party: Optional[str],
+        direction: str,
     ) -> "web.Response":
         """Handle ``agent.call_ended``.
 
@@ -788,9 +828,10 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         interaction.last_activity_at = time.time()
 
         logger.info(
-            "[agentphone] call_ended call_id=%s from=%s reason=%s duration=%ss",
+            "[agentphone] call_ended call_id=%s direction=%s other_party=%s reason=%s duration=%ss",
             call_id,
-            _redact_phone(from_number),
+            direction,
+            _redact_phone(other_party),
             (payload.get("data") or {}).get("disconnectionReason", "?"),
             (payload.get("data") or {}).get("durationSeconds", "?"),
         )
@@ -936,12 +977,15 @@ class AgentPhoneAdapter(BasePlatformAdapter):
             self._interactions.pop(k, None)
 
     def _get_or_create_interaction(
-        self, *, call_id: str, from_number: Optional[str]
+        self, *, call_id: str, other_party: Optional[str]
     ) -> CallInteraction:
         """Return the CallInteraction for ``call_id``, creating one if the
-        call is brand new.  The creation path falls back to:
+        call is brand new.  ``other_party`` is the human's E.164 number
+        regardless of direction (on outbound that means the recipient,
+        on inbound the caller).  The creation path falls back to:
 
-        1. A per-caller intent from ``extra.caller_intents`` if configured
+        1. A per-caller intent from ``extra.caller_intents`` keyed on
+           ``other_party`` if configured
         2. Otherwise the default inbound intent (``_default_inbound_intent``)
         """
         self._prune_interactions()
@@ -949,8 +993,8 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         if existing is not None:
             return existing
         fallback = (
-            self._caller_intents.get(from_number)
-            if from_number
+            self._caller_intents.get(other_party)
+            if other_party
             else None
         )
         intent = fallback or self._default_inbound_intent
@@ -1195,10 +1239,36 @@ class AgentPhoneAdapter(BasePlatformAdapter):
     # Allowlist
     # ------------------------------------------------------------------
 
-    def _is_allowed_inbound(self, from_number: str) -> bool:
-        if self._agent_phone and from_number == self._agent_phone:
-            return True
-        return from_number in self._allowed_inbound
+    def _is_allowed_inbound(self, caller_number: str) -> bool:
+        """Gate an inbound caller against the configured allowlist.
+
+        Only called when ``_resolve_direction`` has determined the
+        webhook represents a human → agent call.  The agent's own
+        number is never a valid caller here — it only appears as
+        ``from`` on outbound webhooks, which this check is not applied
+        to.
+        """
+        return caller_number in self._allowed_inbound
+
+    def _resolve_direction(
+        self, payload: Dict[str, Any], from_number: Optional[str]
+    ) -> str:
+        """Return ``"inbound"`` or ``"outbound"`` for a webhook payload.
+
+        Prefers an explicit ``direction`` field in the payload.  When
+        the field is missing, infers direction from whether ``from``
+        matches the agent's configured phone number: if it does, the
+        agent placed the call (outbound); otherwise a human is dialling
+        in (inbound).  A payload with neither an explicit direction nor
+        a usable ``from`` defaults to ``"inbound"`` so the allowlist
+        still bites.
+        """
+        explicit = _extract_direction(payload)
+        if explicit:
+            return explicit
+        if from_number and self._agent_phone and from_number == self._agent_phone:
+            return "outbound"
+        return "inbound"
 
 
 # ----------------------------------------------------------------------
@@ -1208,7 +1278,13 @@ class AgentPhoneAdapter(BasePlatformAdapter):
 
 
 def _extract_from_number(payload: Dict[str, Any]) -> Optional[str]:
-    """Find the caller's E.164 number across the likely payload shapes."""
+    """Find the ``from`` E.164 number across the likely payload shapes.
+
+    For inbound webhooks this is the caller; for outbound webhooks this
+    is the agent's own number.  Callers that want the human party
+    regardless of direction should use the adapter's resolved
+    ``other_party`` instead.
+    """
     for path in (
         ("from",),
         ("data", "from"),
@@ -1226,6 +1302,55 @@ def _extract_from_number(payload: Dict[str, Any]) -> Optional[str]:
                 break
         if isinstance(cursor, str) and cursor:
             return cursor
+    return None
+
+
+def _extract_to_number(payload: Dict[str, Any]) -> Optional[str]:
+    """Find the ``to`` E.164 number across the likely payload shapes.
+
+    For outbound webhooks this is the recipient (the human the agent
+    dialled); for inbound webhooks this is the agent's own number.
+    """
+    for path in (
+        ("to",),
+        ("data", "to"),
+        ("data", "recipient"),
+        ("data", "recipient_number"),
+        ("recipientNumber",),
+        ("metadata", "recipientNumber"),
+    ):
+        cursor: Any = payload
+        for key in path:
+            if isinstance(cursor, dict):
+                cursor = cursor.get(key)
+            else:
+                cursor = None
+                break
+        if isinstance(cursor, str) and cursor:
+            return cursor
+    return None
+
+
+def _extract_direction(payload: Dict[str, Any]) -> Optional[str]:
+    """Return ``"inbound"``, ``"outbound"``, or ``None`` if unset.
+
+    AgentPhone stamps ``direction`` on at least ``agent.call_ended``
+    payloads and we accept it on ``agent.message`` too if present.  When
+    the field is missing the adapter falls back to inferring direction
+    from whether ``from`` matches the agent's own number.
+    """
+    for path in (("direction",), ("data", "direction")):
+        cursor: Any = payload
+        for key in path:
+            if isinstance(cursor, dict):
+                cursor = cursor.get(key)
+            else:
+                cursor = None
+                break
+        if isinstance(cursor, str):
+            v = cursor.strip().lower()
+            if v in ("inbound", "outbound"):
+                return v
     return None
 
 
