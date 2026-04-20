@@ -117,15 +117,26 @@ SEND_MESSAGE_SCHEMA = {
             },
             "message": {
                 "type": "string",
-                "description": "The message text to send"
+                "description": (
+                    "The message text to send. For text platforms (telegram, slack, discord, sms, email, etc.) "
+                    "this is the literal text the recipient will see. "
+                    "For 'agentphone' targets this is the SPOKEN OPENING GREETING the recipient hears the "
+                    "instant they pick up — 1–2 short sentences written in first person, composed FOR the "
+                    "recipient. Do NOT paste the user's instructions to you here; the recipient would hear "
+                    "their own task description read back to them. Put the call's goal in 'intent' and the "
+                    "shareable facts in 'context_brief' — those drive the on-call agent after the greeting. "
+                    "Example of a correct agentphone message: \"Hi, this is Cosmo, Kevin's assistant — "
+                    "I'm calling to ask how your weekend was.\" Example of a WRONG agentphone message: "
+                    "\"Ask Scott how his weekend was and follow up with clarifying questions.\""
+                )
             },
             "intent": {
                 "type": "string",
-                "description": "REQUIRED for 'agentphone' targets. A short sentence describing what this call is for (e.g. 'Discuss the user's upcoming San Francisco trip'). The agent on the call must stay strictly within this purpose and politely refuse any off-topic requests from the recipient."
+                "description": "REQUIRED for 'agentphone' targets. A short sentence describing what this call is for (e.g. 'Discuss the user's upcoming San Francisco trip', 'Catch up with Scott about his weekend'). The agent on the call must stay strictly within this purpose and politely refuse any off-topic requests from the recipient. This is where the user's task description belongs — NOT in 'message'."
             },
             "context_brief": {
                 "type": "string",
-                "description": "REQUIRED for 'agentphone' targets. The ONLY facts the agent may share during the call. Anything not stated here must not be revealed to the recipient, even if they ask. Keep it concise and factual."
+                "description": "REQUIRED for 'agentphone' targets. The ONLY facts the agent may share during the call (names, times, reservation numbers, reasons, etc.). Anything not stated here must not be revealed to the recipient, even if they ask. Keep it concise and factual — this is ground truth, not a script. Conversational tone/behavior instructions (e.g. 'be friendly', 'ask follow-ups') are already handled by the on-call agent's defaults and don't need to be restated here."
             },
             "forbidden_topics": {
                 "type": "array",
