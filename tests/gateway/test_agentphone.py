@@ -693,6 +693,74 @@ class TestInboundDispatch:
         assert captured[0].source.user_id == ALLOWED_PHONE
 
     @pytest.mark.asyncio
+    async def test_outbound_event_is_pre_authorized(self):
+        """Outbound-call transcripts must carry ``pre_authorized=True`` so the
+        gateway's allowlist doesn't reject turns from a remote party the
+        agent itself dialled."""
+        adapter = _make_adapter()
+        captured: list[MessageEvent] = []
+
+        async def _capture(event: MessageEvent):
+            captured.append(event)
+
+        adapter._message_handler = _record_reply(_capture, reply="ok")
+
+        payload = _outbound_payload(
+            from_number=AGENT_PHONE,
+            to_number="+15550000000",  # deliberately not in inbound allowlist
+            call_id="call_out_preauth",
+            transcript="hey",
+        )
+        body = json.dumps(payload).encode()
+        ts = int(time.time())
+        headers = {
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": str(ts),
+            "X-Webhook-Signature": _sign(body, ts),
+        }
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(WEBHOOK_PATH, data=body, headers=headers)
+            assert resp.status == 200
+
+        await asyncio.sleep(0.05)
+        assert len(captured) == 1
+        assert captured[0].pre_authorized is True
+
+    @pytest.mark.asyncio
+    async def test_inbound_event_is_not_pre_authorized(self):
+        """Inbound events already pass the adapter's inbound allowlist and
+        should still go through the gateway's normal authorization path."""
+        adapter = _make_adapter()
+        captured: list[MessageEvent] = []
+
+        async def _capture(event: MessageEvent):
+            captured.append(event)
+
+        adapter._message_handler = _record_reply(_capture, reply="ok")
+
+        payload = _inbound_payload(
+            from_number=ALLOWED_PHONE,
+            call_id="call_in_preauth",
+            transcript="hello",
+        )
+        body = json.dumps(payload).encode()
+        ts = int(time.time())
+        headers = {
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": str(ts),
+            "X-Webhook-Signature": _sign(body, ts),
+        }
+        app = _build_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(WEBHOOK_PATH, data=body, headers=headers)
+            assert resp.status == 200
+
+        await asyncio.sleep(0.05)
+        assert len(captured) == 1
+        assert captured[0].pre_authorized is False
+
+    @pytest.mark.asyncio
     async def test_malformed_json_returns_400(self):
         adapter = _make_adapter(webhook_secret="")
         app = _build_app(adapter)

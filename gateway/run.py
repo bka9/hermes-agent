@@ -5018,7 +5018,8 @@ Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
         source = event.source
 
         # Internal events (e.g. background-process completion notifications)
-        # are system-generated and must skip user authorization.
+<<<<<<< HEAD
+# are system-generated and must skip user authorization.
         is_internal = bool(getattr(event, "internal", False))
 
         # Fire pre_gateway_dispatch plugin hook for user-originated messages.
@@ -5062,7 +5063,9 @@ Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
                 if _action == "allow":
                     break
 
-        if is_internal:
+        # Events the adapter has already authorized (e.g. AgentPhone outbound-call
+        # turns, where the agent initiated the dial) likewise bypass auth.
+        if is_internal or getattr(event, "pre_authorized", False):
             pass
         elif source.user_id is None:
             # Messages with no user identity (Telegram service messages,

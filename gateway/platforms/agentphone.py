@@ -734,6 +734,11 @@ class AgentPhoneAdapter(BasePlatformAdapter):
             source=source,
             raw_message=payload,
             message_id=call_id,
+            # Outbound calls skipped the inbound allowlist at the top of this
+            # handler; their remote party will never be in the gateway's
+            # AGENTPHONE_ALLOWED_INBOUND_NUMBERS but must still be able to
+            # converse with the agent for the duration of the call.
+            pre_authorized=(direction == "outbound"),
         )
 
         logger.info(

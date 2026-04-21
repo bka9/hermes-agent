@@ -149,6 +149,54 @@ async def test_internal_event_bypasses_authorization(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pre_authorized_event_bypasses_authorization(monkeypatch, tmp_path):
+    """A pre_authorized event (e.g. AgentPhone outbound turn) must skip
+    _is_user_authorized the same way internal events do."""
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text("", encoding="utf-8")
+
+    runner = GatewayRunner(GatewayConfig())
+
+    # Remote party on an outbound call — deliberately not on any allowlist.
+    source = SessionSource(
+        platform=Platform.AGENTPHONE,
+        chat_id="call_out_abc",
+        chat_type="voice",
+        user_id="+15550000000",
+    )
+    event = MessageEvent(
+        text="hi",
+        source=source,
+        pre_authorized=True,
+    )
+
+    auth_called = False
+    original_auth = GatewayRunner._is_user_authorized
+
+    def tracking_auth(self, src):
+        nonlocal auth_called
+        auth_called = True
+        return original_auth(self, src)
+
+    monkeypatch.setattr(GatewayRunner, "_is_user_authorized", tracking_auth)
+
+    async def _raise(*_a, **_kw):
+        raise RuntimeError("sentinel — stop here")
+    monkeypatch.setattr(GatewayRunner, "_handle_message_with_agent", _raise)
+
+    try:
+        await runner._handle_message(event)
+    except RuntimeError:
+        pass
+
+    assert not auth_called, (
+        "_is_user_authorized should NOT be called for pre_authorized events"
+    )
+
+
+@pytest.mark.asyncio
 async def test_internal_event_does_not_trigger_pairing(monkeypatch, tmp_path):
     """An internal event with no user_id must not generate a pairing code."""
     import gateway.run as gateway_run
