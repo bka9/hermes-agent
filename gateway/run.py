@@ -9069,7 +9069,7 @@ class GatewayRunner:
             # provider / api_key / base_url stay as resolved above, so the
             # override should name a model on the same provider.
             if session_model_override:
-                logger.debug(
+                logger.info(
                     "Per-turn model override: %s -> %s (session=%s)",
                     model, session_model_override, (session_key or "")[:30],
                 )
