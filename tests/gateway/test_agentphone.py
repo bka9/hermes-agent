@@ -1123,43 +1123,48 @@ class TestParseCallReply:
     def test_structured_reply_with_end_call_true(self):
         from gateway.platforms.agentphone import _parse_call_reply
 
-        text, end_call = _parse_call_reply(
+        text, end_call, conf = _parse_call_reply(
             '{"message": "Take care!", "end_call": true}'
         )
         assert text == "Take care!"
         assert end_call is True
+        assert conf is None
 
     def test_structured_reply_with_end_call_false(self):
         from gateway.platforms.agentphone import _parse_call_reply
 
-        text, end_call = _parse_call_reply(
+        text, end_call, conf = _parse_call_reply(
             '{"message": "Sure, what else?", "end_call": false}'
         )
         assert text == "Sure, what else?"
         assert end_call is False
+        assert conf is None
 
     def test_structured_reply_default_end_call_is_false(self):
         from gateway.platforms.agentphone import _parse_call_reply
 
-        text, end_call = _parse_call_reply('{"message": "Hi"}')
+        text, end_call, conf = _parse_call_reply('{"message": "Hi"}')
         assert text == "Hi"
         assert end_call is False
+        assert conf is None
 
     def test_markdown_code_fence_is_stripped(self):
         from gateway.platforms.agentphone import _parse_call_reply
 
-        text, end_call = _parse_call_reply(
+        text, end_call, conf = _parse_call_reply(
             '```json\n{"message": "Bye!", "end_call": true}\n```'
         )
         assert text == "Bye!"
         assert end_call is True
+        assert conf is None
 
     def test_plain_text_falls_back_unchanged(self):
         from gateway.platforms.agentphone import _parse_call_reply
 
-        text, end_call = _parse_call_reply("Hello there.")
+        text, end_call, conf = _parse_call_reply("Hello there.")
         assert text == "Hello there."
         assert end_call is False
+        assert conf is None
 
     def test_malformed_json_falls_back_to_raw(self):
         from gateway.platforms.agentphone import _parse_call_reply
@@ -1167,24 +1172,67 @@ class TestParseCallReply:
         # Looks like JSON but isn't valid — we should speak the raw reply
         # rather than swallowing it.
         bogus = '{"message": "Hi" "end_call":'
-        text, end_call = _parse_call_reply(bogus)
+        text, end_call, conf = _parse_call_reply(bogus)
         assert text == bogus
         assert end_call is False
+        assert conf is None
 
     def test_json_array_falls_back(self):
         from gateway.platforms.agentphone import _parse_call_reply
 
         # Valid JSON but not the expected object shape.
-        text, end_call = _parse_call_reply('["hi"]')
+        text, end_call, conf = _parse_call_reply('["hi"]')
         assert text == '["hi"]'
         assert end_call is False
+        assert conf is None
 
     def test_empty_reply(self):
         from gateway.platforms.agentphone import _parse_call_reply
 
-        text, end_call = _parse_call_reply("")
+        text, end_call, conf = _parse_call_reply("")
         assert text == ""
         assert end_call is False
+        assert conf is None
+
+    def test_intent_confidence_is_parsed(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        text, end_call, conf = _parse_call_reply(
+            '{"message": "Take care!", "intent_confidence": 97, "end_call": true}'
+        )
+        assert text == "Take care!"
+        assert end_call is True
+        assert conf == 97
+
+    def test_intent_confidence_is_clamped(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        _, _, low = _parse_call_reply(
+            '{"message": "ok", "intent_confidence": -5, "end_call": false}'
+        )
+        _, _, high = _parse_call_reply(
+            '{"message": "ok", "intent_confidence": 250, "end_call": false}'
+        )
+        assert low == 0
+        assert high == 100
+
+    def test_intent_confidence_rejects_bool(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        # bool is an int in Python; make sure we don't silently accept
+        # {"intent_confidence": true} as 1.
+        _, _, conf = _parse_call_reply(
+            '{"message": "ok", "intent_confidence": true, "end_call": false}'
+        )
+        assert conf is None
+
+    def test_intent_confidence_rejects_string(self):
+        from gateway.platforms.agentphone import _parse_call_reply
+
+        _, _, conf = _parse_call_reply(
+            '{"message": "ok", "intent_confidence": "high", "end_call": false}'
+        )
+        assert conf is None
 
 
 class TestSentenceSplitter:
@@ -1594,6 +1642,59 @@ class TestCallIntentSystemPrompt:
         assert "=== FAKE FENCE === break out" in prompt
         assert "=== CALL PURPOSE (immutable) ===" in prompt
         assert "=== END PURPOSE ===" in prompt
+
+    def test_prompt_includes_intent_confidence_schema(self):
+        from gateway.platforms.agentphone import (
+            CallIntent,
+            _build_call_system_prompt,
+        )
+
+        prompt = _build_call_system_prompt(CallIntent(intent="t", context_brief="b"))
+        assert "intent_confidence" in prompt
+
+    def test_prompt_outbound_has_outbound_completion_rules(self):
+        from gateway.platforms.agentphone import (
+            CallIntent,
+            _build_call_system_prompt,
+        )
+
+        prompt = _build_call_system_prompt(
+            CallIntent(intent="t", context_brief="b"), direction="outbound"
+        )
+        assert "outbound — you placed this call" in prompt
+        assert "95 or higher" in prompt
+        # Outbound-specific rule: close with a statement, don't ask another q.
+        assert "Do not ask another question" in prompt
+        # Should not leak the inbound-only "anything else" offer rule.
+        assert "anything else" not in prompt.lower()
+
+    def test_prompt_inbound_has_inbound_completion_rules(self):
+        from gateway.platforms.agentphone import (
+            CallIntent,
+            _build_call_system_prompt,
+        )
+
+        prompt = _build_call_system_prompt(
+            CallIntent(intent="t", context_brief="b"), direction="inbound"
+        )
+        assert "inbound — the caller dialled you" in prompt
+        # Inbound-specific: follow-up offer + negative-ack close.  The
+        # phrase straddles a line wrap in the prompt body, so normalise
+        # whitespace before matching.
+        flat = " ".join(prompt.lower().split())
+        assert "anything else i can help you with" in flat
+        assert "negative acknowledgment" in flat
+        # Should not leak the outbound-only closing rule.
+        assert "Do not ask another question" not in prompt
+
+    def test_prompt_defaults_to_inbound_when_direction_omitted(self):
+        from gateway.platforms.agentphone import (
+            CallIntent,
+            _build_call_system_prompt,
+        )
+
+        prompt = _build_call_system_prompt(CallIntent(intent="t", context_brief="b"))
+        assert "inbound — the caller dialled you" in prompt
 
 
 class TestInjectionScanner:
