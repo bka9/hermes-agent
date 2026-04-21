@@ -700,6 +700,13 @@ class MessageEvent:
     # completion notifications) that must bypass user authorization checks.
     internal: bool = False
 
+    # Adapter has already made an authorization decision for this event and
+    # the gateway should skip its own allowlist check. Used for outbound
+    # AgentPhone calls: the agent initiated the dial, so transcript turns
+    # from the remote party belong to a conversation the operator already
+    # sanctioned, even though that party isn't on the inbound allowlist.
+    pre_authorized: bool = False
+
     # Per-turn ephemeral system prompt to append to the agent's system
     # prompt for this event only. Adapters set this to inject call-scoped
     # constraints (e.g. AgentPhone's per-call intent + fact brief +

@@ -2841,8 +2841,10 @@ class GatewayRunner:
         source = event.source
 
         # Internal events (e.g. background-process completion notifications)
-        # are system-generated and must skip user authorization.
-        if getattr(event, "internal", False):
+        # are system-generated and must skip user authorization. Events the
+        # adapter has already authorized (e.g. AgentPhone outbound-call
+        # turns, where the agent initiated the dial) likewise bypass.
+        if getattr(event, "internal", False) or getattr(event, "pre_authorized", False):
             pass
         elif source.user_id is None:
             # Messages with no user identity (Telegram service messages,
