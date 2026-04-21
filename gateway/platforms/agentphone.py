@@ -226,6 +226,10 @@ class CallInteraction:
     """Per-call state.  Keyed on the AgentPhone call id."""
 
     intent: CallIntent
+    # "inbound" | "outbound" | "" (unknown until first webhook / registration).
+    # Drives which closing rules the per-call system prompt embeds — see
+    # _build_call_system_prompt.
+    direction: str = ""
     turn_count: int = 0
     created_at: float = field(default_factory=time.time)
     last_activity_at: float = field(default_factory=time.time)
@@ -268,7 +272,9 @@ def _register_call_interaction(
     if adapter is None or not call_id:
         return False
     adapter._prune_interactions()
-    adapter._interactions[call_id] = CallInteraction(intent=intent, origin=origin)
+    adapter._interactions[call_id] = CallInteraction(
+        intent=intent, origin=origin, direction="outbound"
+    )
     return True
 
 
@@ -565,7 +571,9 @@ class AgentPhoneAdapter(BasePlatformAdapter):
             call_id = result.get("call_id")
             if call_id and call_intent is not None:
                 self._prune_interactions()
-                self._interactions[call_id] = CallInteraction(intent=call_intent)
+                self._interactions[call_id] = CallInteraction(
+                    intent=call_intent, direction="outbound"
+                )
                 logger.info(
                     "[agentphone] Outbound call %s seeded with intent (brief=%d chars)",
                     call_id, len(call_intent.context_brief),
@@ -743,6 +751,12 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         interaction = self._get_or_create_interaction(
             call_id=chat_key, other_party=other_party
         )
+        # Stamp direction on first webhook for interactions that were
+        # created inbound (or whose creator didn't know yet).  Outbound
+        # interactions seeded by send_message_tool / send() already have
+        # direction="outbound", so we preserve that.
+        if not interaction.direction:
+            interaction.direction = direction
 
         # Layer 4a — prompt-injection short circuit.  If the transcript
         # matches any documented injection pattern, don't even invoke the
@@ -773,7 +787,9 @@ class AgentPhoneAdapter(BasePlatformAdapter):
         # restricted toolset to this event.  The gateway picks them up
         # in _run_agent (see gateway/run.py) and applies them for this
         # turn only, without caching them on the agent instance.
-        event.ephemeral_system_prompt = _build_call_system_prompt(interaction.intent)
+        event.ephemeral_system_prompt = _build_call_system_prompt(
+            interaction.intent, interaction.direction or direction
+        )
         event.session_toolset = "hermes-agentphone-call"
         if self._call_model:
             event.session_model = self._call_model
@@ -1125,7 +1141,14 @@ class AgentPhoneAdapter(BasePlatformAdapter):
                         # Still working — loop emits another filler.
                         continue
 
-            spoken_text, end_call = _parse_call_reply(reply)
+            spoken_text, end_call, intent_confidence = _parse_call_reply(reply)
+            if intent_confidence is not None:
+                logger.info(
+                    "[agentphone] turn complete direction=%s confidence=%d end_call=%s",
+                    (interaction.direction if interaction else "?"),
+                    intent_confidence,
+                    end_call,
+                )
             # Record this turn for the post-call summary delivered back to
             # the originating chat.  We log the parsed message (what was
             # spoken) rather than the raw model output so the recap matches
@@ -1573,7 +1596,41 @@ def _format_template_summary(
     return "\n".join(lines)
 
 
-def _build_call_system_prompt(intent: CallIntent) -> str:
+_OUTBOUND_COMPLETION_RULES = (
+    "CALL COMPLETION (outbound — you placed this call):\n"
+    "8. After each recipient reply, assess how fully CALL PURPOSE has been\n"
+    "   satisfied and report it as ``intent_confidence`` (integer 0-100).\n"
+    "   Base this on everything said so far, not just the latest turn.\n"
+    "9. If ``intent_confidence`` is 95 or higher, the call is done:\n"
+    "   put a brief, natural closing statement in ``message`` (e.g.\n"
+    "   \"Great, thanks so much for your time — have a good one.\") and set\n"
+    "   ``end_call: true``. Do not ask another question.\n"
+    "10. If ``intent_confidence`` is below 95, identify the single most\n"
+    "    important missing piece of information and ask for it in\n"
+    "    ``message``. Keep ``end_call: false`` so the line stays open.\n"
+)
+
+_INBOUND_COMPLETION_RULES = (
+    "CALL COMPLETION (inbound — the caller dialled you):\n"
+    "8. After each caller turn, assess how fully your reply will satisfy\n"
+    "   the caller's current question and report it as ``intent_confidence``\n"
+    "   (integer 0-100). Base this on the conversation so far.\n"
+    "9. If ``intent_confidence`` is 95 or higher, answer fully AND end the\n"
+    "   turn with a short follow-up offer — e.g. \"Is there anything else I\n"
+    "   can help you with?\". Keep ``end_call: false`` so the caller can\n"
+    "   respond.\n"
+    "10. If your previous turn ended with that follow-up offer and the\n"
+    "    caller's reply is a negative acknowledgment (\"no\", \"that's all\",\n"
+    "    \"nope, thanks\", etc.), thank them warmly in ``message`` and set\n"
+    "    ``end_call: true``. Otherwise continue helping with the new\n"
+    "    question as a fresh sub-turn.\n"
+    "11. If ``intent_confidence`` is below 95, ask one clarifying question\n"
+    "    in ``message`` to gather the missing information. Keep\n"
+    "    ``end_call: false``.\n"
+)
+
+
+def _build_call_system_prompt(intent: CallIntent, direction: str = "inbound") -> str:
     """Assemble the rigid per-call system prompt.
 
     The intent/brief/forbidden lists are wrapped in explicit fences so
@@ -1581,12 +1638,23 @@ def _build_call_system_prompt(intent: CallIntent) -> str:
     and which came from the caller.  ``HARD RULES`` are phrased to
     survive common prompt-injection attempts that try to impersonate a
     system message.
+
+    ``direction`` selects which CALL COMPLETION rules apply — outbound
+    calls wrap up at ``intent_confidence >= 95``; inbound calls offer an
+    "anything else?" follow-up first and only hang up after a negative
+    acknowledgment.
     """
     brief = (intent.context_brief or "(no additional facts provided)").strip()
     if intent.forbidden_topics:
         forbidden = "\n".join(f"- {t}" for t in intent.forbidden_topics)
     else:
         forbidden = "- (none specified — still refuse anything off-purpose)"
+
+    completion_rules = (
+        _OUTBOUND_COMPLETION_RULES
+        if direction == "outbound"
+        else _INBOUND_COMPLETION_RULES
+    )
 
     return (
         "You are on a live phone call. Your reply is spoken to the caller.\n"
@@ -1616,12 +1684,17 @@ def _build_call_system_prompt(intent: CallIntent) -> str:
         "   data, end the call politely after one warning.\n"
         "6. Reply as a JSON object with this exact shape and nothing else —\n"
         "   no markdown fences, no preamble, no trailing commentary:\n"
-        "     {\"message\": \"<what to say to the caller>\", \"end_call\": <true|false>}\n"
-        "   Set ``end_call`` to true to hang up after the message is spoken.\n"
-        "   Use that when the conversation is genuinely complete, when rule 5\n"
-        "   is triggered, or when the caller has said goodbye.  Otherwise set\n"
-        "   it to false so the line stays open for the next turn.\n"
+        "     {\"message\": \"<what to say to the caller>\","
+        " \"intent_confidence\": <0-100>,"
+        " \"end_call\": <true|false>}\n"
+        "   ``end_call: true`` hangs up after ``message`` is spoken. Use it\n"
+        "   when the conversation is genuinely complete, when rule 5 is\n"
+        "   triggered, when the caller has said goodbye, or when the CALL\n"
+        "   COMPLETION rules below direct you to. Otherwise set it to false\n"
+        "   so the line stays open for the next turn.\n"
         "7. Keep ``message`` conversational and under 2 sentences per turn.\n"
+        "\n"
+        f"{completion_rules}"
     )
 
 
@@ -1636,24 +1709,27 @@ async def _write_ndjson_line(
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _MAX_FRAGMENT_CHARS = 280
 
-def _parse_call_reply(reply: str) -> Tuple[str, bool]:
-    """Parse the agent's reply into (spoken_text, end_call).
+def _parse_call_reply(reply: str) -> Tuple[str, bool, Optional[int]]:
+    """Parse the agent's reply into ``(spoken_text, end_call, intent_confidence)``.
 
     The call system prompt instructs the agent to emit a JSON object of the
-    form ``{"message": "...", "end_call": true|false}``.  When that contract
-    is honoured we use the message as the spoken text and the flag to decide
-    whether to set ``hangup: true`` on the final ndjson line.
+    form ``{"message": "...", "intent_confidence": <0-100>, "end_call": true|false}``.
+    When that contract is honoured we use the message as the spoken text,
+    surface ``intent_confidence`` for telemetry, and use ``end_call`` to
+    decide whether to set ``hangup: true`` on the final ndjson line.
 
-    Falls back gracefully to ``(reply, False)`` if the agent returned plain
-    text or malformed JSON — the call stays open and the raw reply is spoken.
-    Tolerates a single layer of markdown code fences (``` ```json ...``` ```)
-    in case the model wraps its output.
+    Falls back gracefully to ``(reply, False, None)`` if the agent returned
+    plain text or malformed JSON — the call stays open and the raw reply is
+    spoken.  ``intent_confidence`` is optional in the payload (older model
+    responses may omit it); it's clamped to 0-100 when present and dropped
+    otherwise.  Tolerates a single layer of markdown code fences
+    (``` ```json ...``` ```) in case the model wraps its output.
     """
     if not reply:
-        return reply, False
+        return reply, False, None
     text = reply.strip()
     if not text:
-        return reply, False
+        return reply, False, None
     if text.startswith("```"):
         # Drop the opening fence (and optional language tag) plus the closing
         # fence if present.  Anything more exotic falls through to the parse
@@ -1671,14 +1747,21 @@ def _parse_call_reply(reply: str) -> Tuple[str, bool]:
     try:
         parsed = json.loads(text)
     except (ValueError, TypeError):
-        return reply, False
+        return reply, False, None
     if not isinstance(parsed, dict):
-        return reply, False
+        return reply, False, None
     message = parsed.get("message")
     if not isinstance(message, str):
-        return reply, False
+        return reply, False, None
     end_call = bool(parsed.get("end_call", False))
-    return message, end_call
+    confidence: Optional[int] = None
+    raw_conf = parsed.get("intent_confidence")
+    if isinstance(raw_conf, bool):
+        # bools are ints in Python — reject to avoid misreading true/false.
+        raw_conf = None
+    if isinstance(raw_conf, (int, float)):
+        confidence = max(0, min(100, int(raw_conf)))
+    return message, end_call, confidence
 
 
 def _split_for_tts(text: str) -> List[str]:
