@@ -108,7 +108,7 @@ class Platform(Enum):
     WEIXIN = "weixin"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
-YUANBAO = "yuanbao"
+    YUANBAO = "yuanbao"
     AGENTPHONE = "agentphone"
     @classmethod
     def _missing_(cls, value):
@@ -456,7 +456,7 @@ class GatewayConfig:
         for platform, config in self.platforms.items():
             if not config.enabled:
                 continue
-if self._is_platform_connected(platform, config):
+            if self._is_platform_connected(platform, config):
                 connected.append(platform)
         return connected
 

@@ -4668,7 +4668,7 @@ class GatewayRunner:
                 return None
             return QQAdapter(config)
 
-elif platform == Platform.YUANBAO:
+        elif platform == Platform.YUANBAO:
             from gateway.platforms.yuanbao import YuanbaoAdapter, WEBSOCKETS_AVAILABLE
             if not WEBSOCKETS_AVAILABLE:
                 logger.warning("Yuanbao: websockets not installed. Run: pip install websockets")
@@ -5018,8 +5018,7 @@ Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
         source = event.source
 
         # Internal events (e.g. background-process completion notifications)
-<<<<<<< HEAD
-# are system-generated and must skip user authorization.
+        # are system-generated and must skip user authorization.
         is_internal = bool(getattr(event, "internal", False))
 
         # Fire pre_gateway_dispatch plugin hook for user-originated messages.
